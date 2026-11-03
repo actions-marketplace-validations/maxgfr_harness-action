@@ -1,0 +1,48 @@
+name: Release check
+
+# Consumes the PUBLISHED action (maxgfr/harness-action@v1), exactly like a user would.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or branch of maxgfr/harness-action to check'
+        required: false
+        default: 'v1'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [opencode, codex, pi]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the mock LLM
+        run: |
+          nohup node test/mock-llm/server.mjs --port 4010 --script test/e2e/smoke-script.json > "$RUNNER_TEMP/mock.log" 2>&1 &
+          sleep 1
+      - uses: actions/checkout@v7
+        with:
+          repository: maxgfr/harness-action
+          ref: ${{ inputs.ref || github.event.release.tag_name || 'v1' }}
+          path: .published
+      - id: harness
+        uses: ./.published
+        env:
+          MOCK_API_KEY: mock
+        with:
+          harness: ${{ matrix.harness }}
+          model: mock/mock-model
+          base_url: http://127.0.0.1:4010/v1
+          api_key_env: MOCK_API_KEY
+          skills: ./test/fixtures/skills
+          skill: echo-check
+          prompt: Run the echo check.
+          json_schema: '{"type":"object","required":["verdict"],"properties":{"verdict":{"type":"string"}}}'
+      - run: test "${{ steps.harness.outputs.conclusion }}" = success && test "${{ steps.harness.outputs.findings_count }}" = 1

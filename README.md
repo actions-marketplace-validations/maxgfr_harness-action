@@ -189,6 +189,8 @@ node test/e2e/run.mjs                      # real harnesses × scripted mock LLM
 node test/e2e/run.mjs --harness pi --scenario pr-automation
 ```
 
+CI runs both on every push, plus a smoke test of `action.yml` itself (`uses: ./`). `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits): comment `@harness-e2e harness=pi` on an issue or a PR of this repository. `e2e-live.yml` runs real models (manual, needs provider secrets).
+
 The e2e suite needs no API key. `test/mock-llm` speaks the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages APIs and replays a script, whatever harness is on the other end. `test/mock-github` records the comments, reviews, refs and GraphQL commits.
 
 ## License
