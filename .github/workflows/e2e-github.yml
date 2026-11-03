@@ -1,0 +1,50 @@
+name: E2E (real GitHub API)
+
+# The action against the REAL GitHub API (comments, reactions, reviews, branches, signed commits)
+# with the scripted mock LLM: comment `@harness-e2e` on an issue or a pull request of this repo.
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  e2e:
+    if: contains(github.event.comment.body, '@harness-e2e')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the mock LLM
+        env:
+          SCRIPT: ${{ github.event.issue.pull_request && 'test/e2e/github-pr-script.json' || 'test/e2e/github-issue-script.json' }}
+        run: |
+          cp -r test/mock-llm "$RUNNER_TEMP/mock-llm"
+          cp "$SCRIPT" "$RUNNER_TEMP/script.json"
+          nohup node "$RUNNER_TEMP/mock-llm/server.mjs" --port 4010 --script "$RUNNER_TEMP/script.json" > "$RUNNER_TEMP/mock.log" 2>&1 &
+          sleep 1
+      - name: harness-action
+        id: harness
+        uses: ./
+        env:
+          MOCK_API_KEY: mock
+        with:
+          harness: ${{ contains(github.event.comment.body, 'harness=') && (contains(github.event.comment.body, 'harness=pi') && 'pi' || contains(github.event.comment.body, 'harness=codex') && 'codex' || 'opencode') || 'opencode' }}
+          model: mock/mock-model
+          base_url: http://127.0.0.1:4010/v1
+          api_key_env: MOCK_API_KEY
+          trigger_phrase: '@harness-e2e'
+          tools: full
+          skills: ./test/fixtures/skills
+          timeout_minutes: '5'
+          on_agent_error: fail
+      - name: Check the outputs
+        env:
+          CONCLUSION: ${{ steps.harness.outputs.conclusion }}
+          BRANCH: ${{ steps.harness.outputs.branch_name }}
+        run: |
+          echo "conclusion=$CONCLUSION branch=$BRANCH"
+          test "$CONCLUSION" = success
+          test -n "$BRANCH"

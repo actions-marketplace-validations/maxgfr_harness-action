@@ -1,0 +1,9 @@
+{
+  "steps": [
+    { "tool": "update_progress", "args": { "markdown": "- [x] read the diff\n- [x] comment inline\n- [x] update ECHO.md" } },
+    { "tool": "get_pr_diff", "args": {} },
+    { "tool": "add_inline_comment", "args": { "path": "E2E.md", "line": 1, "body": "E2E inline comment from harness-action." } },
+    { "shell": "printf 'echo-check ran on the PR\\n' > ECHO.md" },
+    { "text": "ECHO_DONE — reviewed and pushed `ECHO.md` to this branch." }
+  ]
+}
