@@ -10,6 +10,10 @@ jobs:
   e2e:
     if: contains(github.event.comment.body, '@harness-e2e')
     runs-on: ubuntu-latest
+    # one run per issue / PR at a time: pushes to a PR branch must not race
+    concurrency:
+      group: e2e-github-${{ github.event.issue.number }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
@@ -17,6 +21,13 @@ jobs:
       checks: read
     steps:
       - uses: actions/checkout@v7
+      - name: Which harness
+        id: pick
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          h=$(printf '%s' "$BODY" | grep -oE 'harness=(opencode|codex|pi|claw)' | head -1 | cut -d= -f2)
+          echo "harness=${h:-opencode}" >> "$GITHUB_OUTPUT"
       - name: Start the mock LLM
         env:
           SCRIPT: ${{ github.event.issue.pull_request && 'test/e2e/github-pr-script.json' || 'test/e2e/github-issue-script.json' }}
@@ -31,7 +42,7 @@ jobs:
         env:
           MOCK_API_KEY: mock
         with:
-          harness: ${{ contains(github.event.comment.body, 'harness=') && (contains(github.event.comment.body, 'harness=pi') && 'pi' || contains(github.event.comment.body, 'harness=codex') && 'codex' || 'opencode') || 'opencode' }}
+          harness: ${{ steps.pick.outputs.harness }}
           model: mock/mock-model
           base_url: http://127.0.0.1:4010/v1
           api_key_env: MOCK_API_KEY
