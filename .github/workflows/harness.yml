@@ -1,0 +1,39 @@
+name: harness
+
+# Dogfooding: mention @harness in an issue, a pull request or a review comment of this repository.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned, labeled]
+
+jobs:
+  harness:
+    if: contains(github.event.comment.body || github.event.review.body || github.event.issue.body || '', '@harness') || github.event.action == 'labeled' || github.event.action == 'assigned'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        with:
+          harness: ${{ vars.HARNESS || 'opencode' }}
+          model: ${{ vars.HARNESS_MODEL || 'anthropic/claude-sonnet-5-5' }}
+          allow_bash: |
+            npm test*
+            npm run *
+            node --test*
+            git diff*
+            git status*
+            git log*

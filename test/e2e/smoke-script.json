@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "tool": "update_progress", "args": { "markdown": "- [x] ran the echo check" } },
+    { "tool": "report_finding", "args": { "file": "README.md", "line": 1, "severity": "notice", "message": "echo-check ran" } },
+    { "tool": "submit_structured_output", "args": { "verdict": "pass" } },
+    { "text": "ECHO_DONE — smoke test of action.yml." }
+  ]
+}

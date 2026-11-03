@@ -1,0 +1,6 @@
+{
+  "opencode": { "package": "opencode-ai", "bin": "opencode", "version": "1.19.5" },
+  "codex": { "package": "@openai/codex", "bin": "codex", "version": "0.166.0" },
+  "pi": { "package": "@earendil-works/pi-coding-agent", "bin": "pi", "version": "1.5.0" },
+  "claw": { "repo": "https://github.com/ultraworkers/claw-code", "bin": "claw", "version": "51cfca114cf506a5d7a53ab1bffa8e1bbd3c780d" }
+}

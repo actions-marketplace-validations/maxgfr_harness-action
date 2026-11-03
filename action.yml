@@ -1,0 +1,297 @@
+name: harness-action
+description: Run an open-source coding-agent harness (OpenCode, Codex, Pi, claw-code) in GitHub Actions — any model, any Agent Skill, @mentions, signed commits, reviews.
+author: maxgfr
+
+branding:
+  icon: cpu
+  color: gray-dark
+
+inputs:
+  # ── what to run ───────────────────────────────────────────────────────────────────────────
+  prompt:
+    description: 'Instructions for the agent. Set → automation mode (runs on any event). Empty → tag mode (runs when someone mentions `trigger_phrase`, applies `label_trigger` or assigns `assignee_trigger`). In tag mode a prompt is appended as extra instructions.'
+    required: false
+    default: ''
+  harness:
+    description: 'Which harness drives the run: `opencode` (default), `codex`, `pi` or `claw` (experimental, built from source).'
+    required: false
+    default: 'opencode'
+  harness_version:
+    description: 'Harness version (npm version; a commit SHA or a binary path for claw). Empty = the version pinned and tested by this release.'
+    required: false
+    default: ''
+  model:
+    description: 'Model as `provider/model`, e.g. `anthropic/claude-sonnet-5-5`, `openai/gpt-5.1`, `openrouter/qwen/qwen3-coder`. Provider API keys are read from the environment (`env:` on the step).'
+    required: true
+  base_url:
+    description: 'OpenAI-compatible (or Anthropic-compatible) endpoint for a provider the harness does not know: a gateway, vLLM, Ollama, LiteLLM…'
+    required: false
+    default: ''
+  api_key_env:
+    description: 'Name of the environment variable that holds the API key for `base_url` (default depends on the provider, else OPENAI_API_KEY).'
+    required: false
+    default: ''
+  skills:
+    description: 'Agent Skills to install, one per line: `owner/repo`, `owner/repo@ref`, `owner/repo#skill-name`, a git URL or a local path. Skills committed in the repository (.agents/.claude/.opencode/.claw/skills) are always available.'
+    required: false
+    default: ''
+  skill:
+    description: 'Name of an installed skill the agent must use for this task.'
+    required: false
+    default: ''
+  skills_token:
+    description: 'Token used to clone skills from private repositories. Defaults to `github_token`.'
+    required: false
+    default: ''
+  tools:
+    description: 'Permission level: `auto` (tag mode → edit, automation → read-only), `read-only`, `edit` (+ write files, shell limited to `allow_bash`), `full` (+ any shell command and web access).'
+    required: false
+    default: 'auto'
+  allow_bash:
+    description: 'Shell commands allowed at the `edit` level (glob patterns, one per line, e.g. `npm test*`). Enforced per pattern by OpenCode; Pi and claw can only enable bash as a whole; Codex runs commands inside its sandbox.'
+    required: false
+    default: ''
+  harness_args:
+    description: 'Extra command-line arguments passed to the harness verbatim.'
+    required: false
+    default: ''
+  harness_config:
+    description: 'Harness-native configuration merged on top of the generated one: JSON (inline or path) for OpenCode, claw and Pi (`{"settings.json": {…}}`), JSON or TOML for Codex.'
+    required: false
+    default: ''
+  mcp_config:
+    description: 'Extra MCP servers, in one portable JSON shape for every harness: `{"name": {"command": "npx", "args": […], "env": {…}}}` or `{"name": {"url": "https://…", "headers": {…}}}`.'
+    required: false
+    default: ''
+  json_schema:
+    description: 'JSON schema (inline or path) of a structured result. The agent must submit it through the `submit_structured_output` tool; it is validated and exposed as the `structured_output` output.'
+    required: false
+    default: ''
+  max_steps:
+    description: 'Stop the agent after this many tool calls.'
+    required: false
+    default: '200'
+  timeout_minutes:
+    description: 'Stop the agent after this many minutes.'
+    required: false
+    default: '30'
+  budget_usd:
+    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and claw report cost; Codex does not). Empty = no budget.'
+    required: false
+    default: ''
+
+  # ── tag mode ──────────────────────────────────────────────────────────────────────────────
+  trigger_phrase:
+    description: 'Phrase that wakes the agent up in comments, reviews, issue and PR bodies.'
+    required: false
+    default: '@harness'
+  label_trigger:
+    description: 'Label that wakes the agent up on an issue.'
+    required: false
+    default: 'harness'
+  assignee_trigger:
+    description: 'Assigning this user to an issue wakes the agent up.'
+    required: false
+    default: ''
+  track_progress:
+    description: 'In automation mode on pull_request / issues events, also keep a tracking comment like tag mode does.'
+    required: false
+    default: 'false'
+  use_sticky_comment:
+    description: 'Reuse one comment per issue / PR across runs instead of posting a new one each time.'
+    required: false
+    default: 'false'
+  post_comment:
+    description: 'Automation mode: post the result as a sticky comment on the pull request / issue.'
+    required: false
+    default: 'false'
+
+  # ── access control ────────────────────────────────────────────────────────────────────────
+  allowed_bots:
+    description: 'Bots allowed to trigger the agent (comma or newline separated, `*` for all).'
+    required: false
+    default: ''
+  allowed_non_write_users:
+    description: 'Users without write access allowed to trigger the agent (`*` for all). Prompt-injection risk: use with care.'
+    required: false
+    default: ''
+  include_comments_by_actor:
+    description: 'Only include comments from these authors in the conversation given to the agent (wildcards allowed, e.g. `*[bot]`).'
+    required: false
+    default: ''
+  exclude_comments_by_actor:
+    description: 'Exclude comments from these authors from the conversation (wins over include).'
+    required: false
+    default: ''
+
+  # ── git ───────────────────────────────────────────────────────────────────────────────────
+  github_token:
+    description: 'Token for the GitHub API (comments, reviews, commits). The default job token works; pass a GitHub App token to act as your own bot. It never reaches the agent process.'
+    required: false
+    default: ${{ github.token }}
+  commit_mode:
+    description: '`auto` (tag mode: issue → new branch, PR → push to the PR branch; automation: none), `pr-branch`, `new-branch` or `none` (changes are only saved as a patch artifact). Commits are made through the GitHub API and are signed (Verified).'
+    required: false
+    default: 'auto'
+  base_branch:
+    description: 'Branch new branches start from (default: the checked-out branch).'
+    required: false
+    default: ''
+  branch_prefix:
+    description: 'Prefix of the branches the action creates.'
+    required: false
+    default: 'harness/'
+  branch_name_template:
+    description: 'Branch name template. Variables: {{prefix}} {{entityType}} {{entityNumber}} {{timestamp}} {{sha}} {{description}}.'
+    required: false
+    default: ''
+  additional_permissions:
+    description: 'Informational: list extra token permissions you granted (e.g. `actions: read`) so get_ci_status can work.'
+    required: false
+    default: ''
+
+  # ── reporting ─────────────────────────────────────────────────────────────────────────────
+  fail_on:
+    description: 'Fail the job when the agent reports a finding at or above this severity: `error`, `warning` or `notice`. Empty = never.'
+    required: false
+    default: ''
+  on_agent_error:
+    description: 'When the agent itself fails (provider error, timeout, budget): `warn` (default, the job stays green) or `fail`.'
+    required: false
+    default: 'warn'
+  annotations:
+    description: 'Emit findings as workflow annotations.'
+    required: false
+    default: 'true'
+  sarif:
+    description: 'Write findings as SARIF and upload them to code scanning (needs `security-events: write`).'
+    required: false
+    default: 'false'
+  display_report:
+    description: 'Add the full transcript to the job summary (only for trusted input).'
+    required: false
+    default: 'false'
+  show_full_output:
+    description: 'Print the raw harness output in the logs (may expose secrets the agent reads).'
+    required: false
+    default: 'false'
+  artifact:
+    description: 'Upload the run report (execution log, prompt, findings, patch, configs) as an artifact.'
+    required: false
+    default: 'true'
+  artifact_name:
+    description: 'Name of the artifact (default: unique per run).'
+    required: false
+    default: ''
+  working_directory:
+    description: 'Directory the agent works in, relative to the workspace.'
+    required: false
+    default: '.'
+  setup_node:
+    description: 'Install Node.js 24 with actions/setup-node (set false when your job already provides Node ≥ 22.19).'
+    required: false
+    default: 'true'
+
+outputs:
+  conclusion:
+    description: '`success`, `failure` (the agent failed or its structured output is invalid) or `skipped`.'
+    value: ${{ steps.publish.outputs.conclusion || 'skipped' }}
+  mode:
+    description: '`tag`, `automation` or `skip`.'
+    value: ${{ steps.publish.outputs.mode || steps.prepare.outputs.mode }}
+  harness:
+    description: 'Harness used.'
+    value: ${{ steps.resolve.outputs.harness }}
+  model:
+    description: 'Model used.'
+    value: ${{ steps.publish.outputs.model }}
+  execution_file:
+    description: 'Path of the normalised execution log (JSONL).'
+    value: ${{ steps.publish.outputs.execution_file }}
+  report_dir:
+    description: 'Directory with every report file of the run.'
+    value: ${{ steps.publish.outputs.report_dir }}
+  branch_name:
+    description: 'Branch the changes were committed to, if any.'
+    value: ${{ steps.publish.outputs.branch_name }}
+  session_id:
+    description: 'Harness session / thread id.'
+    value: ${{ steps.publish.outputs.session_id }}
+  structured_output:
+    description: 'Validated structured output (JSON string), when `json_schema` is set.'
+    value: ${{ steps.publish.outputs.structured_output }}
+  cost_usd:
+    description: 'Cost reported by the harness, in USD (empty when unknown).'
+    value: ${{ steps.publish.outputs.cost_usd }}
+  findings_count:
+    description: 'Number of findings reported by the agent.'
+    value: ${{ steps.publish.outputs.findings_count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      if: inputs.setup_node == 'true'
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    - name: Resolve
+      id: resolve
+      shell: bash
+      env:
+        HARNESS_INPUTS: ${{ toJSON(inputs) }}
+      run: node "$GITHUB_ACTION_PATH/src/cli.mjs" resolve
+
+    - name: Cache the harness
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.resolve.outputs.cache_path }}
+        key: ${{ steps.resolve.outputs.cache_key }}
+
+    # Holds the GitHub token: decides whether to run, gathers the context, installs the harness
+    # and the skills, posts the tracking comment, then removes persisted git credentials.
+    - name: Prepare
+      id: prepare
+      shell: bash
+      env:
+        HARNESS_INPUTS: ${{ toJSON(inputs) }}
+        HARNESS_STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
+        HARNESS_TOOLS_DIR: ${{ steps.resolve.outputs.tools_dir }}
+      run: node "$GITHUB_ACTION_PATH/src/cli.mjs" prepare
+
+    # NO token here: the agent runs from the token-free plan written by Prepare.
+    - name: Run the agent
+      id: run
+      if: steps.prepare.outputs.run == 'true'
+      shell: bash
+      env:
+        HARNESS_STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
+      run: node "$GITHUB_ACTION_PATH/src/cli.mjs" run
+
+    # Holds the token again: commits, review, comment, summary, outputs, gate.
+    - name: Publish
+      id: publish
+      if: always() && steps.resolve.outcome == 'success'
+      shell: bash
+      env:
+        HARNESS_INPUTS: ${{ toJSON(inputs) }}
+        HARNESS_STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
+      run: node "$GITHUB_ACTION_PATH/src/cli.mjs" publish
+
+    - name: Upload SARIF
+      if: always() && inputs.sarif == 'true' && steps.publish.outputs.sarif_file != ''
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.publish.outputs.sarif_file }}
+        category: harness-${{ inputs.harness }}
+
+    - name: Upload the report
+      if: always() && inputs.artifact == 'true' && steps.prepare.outputs.run == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact_name || steps.resolve.outputs.artifact_name }}
+        path: ${{ steps.resolve.outputs.state_dir }}/report
+        if-no-files-found: ignore
+        retention-days: 14

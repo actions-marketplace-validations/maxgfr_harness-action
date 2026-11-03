@@ -1,0 +1,16 @@
+{
+  "name": "harness-action",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run an open-source coding-agent harness (OpenCode, Codex, Pi, claw-code) in GitHub Actions with any model and any Agent Skill.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "test": "node --test test/unit/*.test.mjs",
+    "test:e2e": "node test/e2e/run.mjs",
+    "check": "for f in src/*.mjs src/*/*.mjs test/*/*.mjs scripts/*.mjs; do node --check \"$f\" || exit 1; done"
+  }
+}

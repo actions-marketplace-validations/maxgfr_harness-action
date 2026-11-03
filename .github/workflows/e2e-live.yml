@@ -1,0 +1,48 @@
+name: E2E (live models)
+
+# Real providers, real cost: manual only. Configure the secrets you have; legs without a key fail.
+on:
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: 'Harness (empty = the default matrix)'
+        required: false
+        default: ''
+      model:
+        description: 'Model, provider/model (with harness)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.harness != '' && format('[{{"harness":"{0}","model":"{1}"}}]', inputs.harness, inputs.model) || '[{"harness":"opencode","model":"anthropic/claude-haiku-5-5"},{"harness":"opencode","model":"openrouter/qwen/qwen3-coder"},{"harness":"codex","model":"openai/gpt-5.1-codex-mini"},{"harness":"pi","model":"openrouter/deepseek/deepseek-chat-v3.1"},{"harness":"claw","model":"anthropic/claude-haiku-5-5"}]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: harness-action (${{ matrix.harness }} · ${{ matrix.model }})
+        id: harness
+        uses: ./
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        with:
+          harness: ${{ matrix.harness }}
+          model: ${{ matrix.model }}
+          skills: ./test/fixtures/skills
+          skill: echo-check
+          tools: read-only
+          prompt: Run the echo check on this repository. Do not create files (you are read-only); just report the finding.
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+      - name: Check
+        run: |
+          test "${{ steps.harness.outputs.conclusion }}" = success
+          test "${{ steps.harness.outputs.findings_count }}" -ge 1

@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm run check
+      - run: npm test
+
+  # The real harness binaries against a scripted mock LLM and a mock GitHub API: no secret, no cost.
+  e2e-mock:
+    needs: unit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [opencode, codex, pi, claw]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/cache@v6
+        with:
+          path: .harness/tools
+          key: e2e-tools-v1-${{ runner.os }}-${{ matrix.harness }}-${{ hashFiles('src/harness/versions.json') }}
+      - name: Git identity for the fixture repository
+        run: git config --global user.name ci && git config --global user.email ci@example.com
+      - run: node test/e2e/run.mjs --harness ${{ matrix.harness }}
+
+  # action.yml itself, consumed as `uses: ./`, against the mock LLM.
+  action-smoke:
+    needs: unit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [opencode, codex, pi]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Start the mock LLM
+        run: |
+          nohup node test/mock-llm/server.mjs --port 4010 --script test/e2e/smoke-script.json > "$RUNNER_TEMP/mock.log" 2>&1 &
+          sleep 1
+      - name: Run harness-action
+        id: harness
+        uses: ./
+        env:
+          MOCK_API_KEY: mock
+        with:
+          harness: ${{ matrix.harness }}
+          model: mock/mock-model
+          base_url: http://127.0.0.1:4010/v1
+          api_key_env: MOCK_API_KEY
+          skills: ./test/fixtures/skills
+          skill: echo-check
+          tools: read-only
+          prompt: Run the echo check.
+          json_schema: '{"type":"object","required":["verdict"],"properties":{"verdict":{"type":"string"}}}'
+          timeout_minutes: '5'
+      - name: Check the outputs
+        env:
+          CONCLUSION: ${{ steps.harness.outputs.conclusion }}
+          FINDINGS: ${{ steps.harness.outputs.findings_count }}
+          STRUCTURED: ${{ steps.harness.outputs.structured_output }}
+        run: |
+          echo "conclusion=$CONCLUSION findings=$FINDINGS structured=$STRUCTURED"
+          test "$CONCLUSION" = success
+          test "$FINDINGS" = 1
+          echo "$STRUCTURED" | grep -q '"verdict":"pass"'

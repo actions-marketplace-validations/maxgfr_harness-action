@@ -1,0 +1,33 @@
+name: Bump harnesses
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - id: bump
+        run: node scripts/bump-harnesses.mjs
+      # The e2e matrix runs on the pull request; merge only when it is green.
+      - if: steps.bump.outputs.changes != ''
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: bump-harnesses
+          sign-commits: true
+          commit-message: 'chore: bump pinned harness versions'
+          title: 'chore: bump pinned harness versions'
+          body: |
+            ${{ steps.bump.outputs.changes }}
+
+            The keyless e2e matrix (CI) validates every harness against the new versions.
