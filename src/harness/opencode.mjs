@@ -54,6 +54,9 @@ export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig 
     share: 'disabled',
     permissions: permissionRules(perms),
     mcp: { servers },
+    // Without a provider, OpenCode asks the user to pick one on the first search; nobody can
+    // answer in CI, so every call ended "Web search cancelled". Exa needs no key.
+    ...(perms.web ? { websearch: { provider: 'exa' } } : {}),
   };
   if (endpoint.custom) {
     config.providers = {

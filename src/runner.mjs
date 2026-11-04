@@ -106,14 +106,18 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
         if (limits.budgetUsd && acc.costKnown && acc.cost > limits.budgetUsd && !killedReason) killedReason = `cost $${acc.cost.toFixed(4)} exceeds budget_usd $${limits.budgetUsd}`;
       }
       const exitCode = code ?? (signal ? 128 : 1);
-      if (exitCode !== 0 && !acc.errors.length && !killedReason) {
-        emit({ t: 'error', message: `${adapter.id} exited with code ${exitCode}${stderrTail ? `: ${truncate(stderrTail.trim().split('\n').slice(-5).join(' | '), 600)}` : ''}` });
-      }
+      const exitDetail = `${adapter.id} exited with code ${exitCode}${stderrTail ? `: ${truncate(stderrTail.trim().split('\n').slice(-5).join(' | '), 600)}` : ''}`;
+      // A non-zero exit AFTER a finished turn (a final message, no error since) is reported but
+      // does not fail the run: the work is done (seen with OpenCode 2 after failed tool calls).
+      const finishedTurn = Boolean(acc.finalText) && lastErrorIndex < lastTextIndex;
+      const benignExit = exitCode !== 0 && !killedReason && adapter.streaming && finishedTurn && !acc.errors.length;
+      if (benignExit) emit({ t: 'warning', message: `${exitDetail} after finishing its turn; the result is kept` });
+      else if (exitCode !== 0 && !acc.errors.length && !killedReason) emit({ t: 'error', message: exitDetail });
       // A provider error the harness recovered from (a retry that produced an answer) is not fatal.
       const fatalError = lastErrorIndex > lastTextIndex;
       let status = 'success';
       if (killedReason) status = /timeout/.test(killedReason) ? 'timeout' : /budget/.test(killedReason) ? 'budget' : 'max_steps';
-      else if (exitCode !== 0 || fatalError || (!acc.finalText && acc.errors.length)) status = 'error';
+      else if ((exitCode !== 0 && !benignExit) || fatalError || (!acc.finalText && acc.errors.length)) status = 'error';
       fs.closeSync(exec);
       if (raw) fs.closeSync(raw);
       resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason, stderrTail });

@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { runHarness } from '../../src/runner.mjs';
+import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
 import { buildConfig as codexConfig } from '../../src/harness/codex.mjs';
@@ -98,6 +101,33 @@ test('openclaw command: the action picks the session id, then reuses it', () => 
   assert.ok(first.args.includes('--json'));
   assert.equal(first.args[first.args.indexOf('--timeout') + 1], '120');
   assert.equal(a.command({ prepared: { newSessionId: 'new-id' }, prompt: 'hi', extraArgs: [], sessionId: 'old-id' }).sessionId, 'old-id');
+});
+
+test('runner: exit 1 after a finished turn keeps the result; exit 1 without one fails', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-'));
+  const fake = (lines, code) => {
+    const script = path.join(tmp, `fake-${code}-${lines.length}.mjs`);
+    fs.writeFileSync(script, `${lines.map((l) => `console.log(${JSON.stringify(JSON.stringify(l))});`).join('\n')}\nprocess.exit(${code});\n`);
+    return script;
+  };
+  const run = (script) => runHarness({ adapter: getAdapter('opencode'), bin: process.execPath, args: [script], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, `exec-${path.basename(script)}.jsonl`), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: () => {} });
+  const finished = [
+    { type: 'tool_use', part: { tool: 'websearch', state: { status: 'error', input: {}, error: 'Web search cancelled' } } },
+    { type: 'text', sessionID: 's', part: { text: 'REPORT DONE' } },
+    { type: 'step_finish', part: { reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 } },
+  ];
+  const ok = await run(fake(finished, 1));
+  assert.equal(ok.status, 'success');
+  assert.match(ok.acc.finalText, /REPORT DONE/);
+  const bad = await run(fake([{ type: 'step_start', sessionID: 's', part: {} }], 1));
+  assert.equal(bad.status, 'error');
+  assert.match(bad.acc.errors.at(-1), /exited with code 1/);
+});
+
+test('opencode: web search gets a keyless provider only when web access is allowed', () => {
+  const base = { model: { provider: 'anthropic', id: 'm' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), mcpServers: {} };
+  assert.deepEqual(opencodeConfig({ ...base, perms: permissionProfile('full') }).websearch, { provider: 'exa' });
+  assert.equal(opencodeConfig({ ...base, perms: permissionProfile('read-only') }).websearch, undefined);
 });
 
 test('splitArgs honours quotes', () => {

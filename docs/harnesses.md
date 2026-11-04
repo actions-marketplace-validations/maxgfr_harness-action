@@ -25,7 +25,9 @@ Skills committed to the repository in **any** of `.agents/`, `.claude/`, `.openc
   - the service is found through `$TMPDIR`, so the run gets its own `TMPDIR`. Otherwise a service started by another run, with another config, would be reused;
   - MCP tools are keyed by real directory (`/var` → `/private/var` on macOS), so every path the harness sees is a real path;
   - MCP tools are hidden behind Code Mode's `execute` unless the server sets `codemode: false`, which the adapter does;
-  - the service is stopped when the run ends.
+  - the service is stopped when the run ends;
+  - without `websearch.provider`, the first web search waits for a provider-consent prompt nobody answers in CI, and every call ends "Web search cancelled": with web access (`tools: full`) the adapter sets the keyless `exa` provider;
+  - `opencode run` can exit 1 right after a finished turn (seen after failed tool calls): a non-zero exit after a final message, with no error since, keeps the result and is reported as a warning.
 - **Codex** blocks MCP tool calls under `approval_policy = never` unless the server sets `default_tools_approval_mode = "approve"`. It emits transient `error` events ("Reconnecting… n/5") before the fatal `turn.failed`; only the latter counts as an error. It waits on stdin when stdin is open.
 - **Pi** exits with code **0** on a provider error; the failure is in `message_end.stopReason = "error"`. An explicit `--tools` list drops MCP tools unless it includes `mcp__*`. MCP servers need `exposure: "direct"` to be visible to the model.
 - **OpenClaw**:
