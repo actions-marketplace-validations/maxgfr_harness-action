@@ -16,8 +16,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const CLI = path.join(ROOT, 'src', 'cli.mjs');
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : d; };
 const HARNESSES = arg('harness', 'opencode,codex,pi,claw').split(',');
-const SCENARIOS = arg('scenario', 'issue-tag,pr-automation').split(',');
+const SCENARIOS = arg('scenario', 'issue-tag,pr-automation,conversation-loop').split(',');
 const TOOLS_DIR = process.env.HARNESS_TOOLS_DIR || path.join(ROOT, '.harness', 'tools');
+
+/** `opencode-v1` = OpenCode 1 through `harness_version: 1`; CLAW_BIN = a prebuilt claw. */
+function harnessInputs(h) {
+  if (h === 'opencode-v1') return { harness: 'opencode', harness_version: '1' };
+  return { harness: h, harness_version: h === 'claw' && process.env.CLAW_BIN ? process.env.CLAW_BIN : '' };
+}
 
 const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
 const readOutputs = (file) => {
@@ -95,7 +101,7 @@ async function scenario(harness, name) {
     sarif: 'true',
     timeout_minutes: '5',
     json_schema: isPR ? JSON.stringify({ type: 'object', required: ['verdict'], properties: { verdict: { type: 'string', enum: ['pass', 'fail'] }, score: { type: 'integer' } } }) : '',
-    harness_version: harness === 'claw' && process.env.CLAW_BIN ? process.env.CLAW_BIN : '',
+    ...harnessInputs(harness),
   };
   const outputFile = path.join(tmp, 'output.txt');
   const summaryFile = path.join(tmp, 'summary.md');
@@ -197,6 +203,130 @@ async function scenario(harness, name) {
   return failed.length === 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// conversation-loop: two runs of the action on one conversation.
+//   run 1 — `@harness` on issue #7, loop_until `test -f DONE.md`, open_pr: turn 1 answers without
+//           doing the work, the check fails, turn 2 (same session, fed the check output) creates
+//           DONE.md, the check passes, PR #21 is opened, the session is saved under pr-21;
+//   run 2 — `@harness` on PR #21: the session is resumed (the mock refuses to answer unless the
+//           history it receives contains run 1's last message).
+// claw cannot resume a session: it runs the loop part only.
+// ---------------------------------------------------------------------------------------------
+const CONVERSATION_SCRIPT = [
+  { text: 'FIRST_TURN — not done yet.' },
+  { shell: 'touch DONE.md' },
+  { text: 'FIRST_DONE — DONE.md exists now.' },
+  { text: 'SECOND_WITH_MEMORY — I remember the first run.', expectHistory: 'FIRST_DONE' },
+];
+
+async function conversationLoop(harness) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `ha-e2e-conv-${harness}-`));
+  const workspace = path.join(tmp, 'workspace');
+  const { sha } = makeRepo(workspace);
+  const llm = createMockServer({ steps: CONVERSATION_SCRIPT, log: path.join(tmp, 'llm.jsonl') });
+  const llmPort = await listen(llm);
+  const issue = { number: 7, title: 'Create DONE.md', body: 'We need DONE.md', html_url: 'https://github.com/acme/demo/issues/7', user: { login: 'alice' }, state: 'open' };
+  const pr = { number: 21, title: 'Create DONE.md', body: 'opened by harness', html_url: 'https://github.com/acme/demo/pull/21', user: { login: 'harness[bot]' }, state: 'open', head: { ref: 'harness/issue-7', sha, repo: { full_name: 'acme/demo' } }, base: { ref: 'main', sha, repo: { full_name: 'acme/demo' } } };
+  const gh = createGitHubMock({ pr, issue, diff: 'diff --git a/DONE.md b/DONE.md\n--- /dev/null\n+++ b/DONE.md\n@@ -0,0 +1 @@\n+\n' });
+  const ghPort = await listen(gh.server);
+  const outputFile = path.join(tmp, 'output.txt');
+  const inputs = {
+    harness,
+    model: 'mock/mock-model',
+    base_url: `http://127.0.0.1:${llmPort}/v1`,
+    api_key_env: 'MOCK_API_KEY',
+    github_token: 'ghs_mocktoken',
+    tools: 'full',
+    loop_until: 'test -f DONE.md',
+    max_iterations: '3',
+    open_pr: 'true',
+    timeout_minutes: '5',
+    ...harnessInputs(harness),
+  };
+  const envFor = (event, eventName) => {
+    const file = path.join(tmp, `event-${eventName}.json`);
+    fs.writeFileSync(file, JSON.stringify(event));
+    return {
+      ...process.env,
+      GITHUB_EVENT_NAME: 'issue_comment',
+      GITHUB_EVENT_PATH: file,
+      GITHUB_REPOSITORY: 'acme/demo',
+      GITHUB_API_URL: `http://127.0.0.1:${ghPort}`,
+      GITHUB_GRAPHQL_URL: `http://127.0.0.1:${ghPort}/graphql`,
+      GITHUB_SERVER_URL: 'https://github.com',
+      GITHUB_WORKSPACE: workspace,
+      GITHUB_RUN_ID: eventName === 'first' ? '100' : '101',
+      GITHUB_ACTOR: 'alice',
+      GITHUB_SHA: sha,
+      GITHUB_JOB: 'e2e',
+      RUNNER_TEMP: tmp,
+      GITHUB_OUTPUT: outputFile,
+      GITHUB_STEP_SUMMARY: path.join(tmp, 'summary.md'),
+      HARNESS_TOOLS_DIR: TOOLS_DIR,
+      MOCK_API_KEY: 'mock-key',
+    };
+  };
+  const step = (cmd, env) => new Promise((resolve) => {
+    fs.writeFileSync(outputFile, '');
+    const child = spawn(process.execPath, [CLI, cmd], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (out += c));
+    child.on('close', (code) => resolve({ code, out, outputs: readOutputs(outputFile) }));
+  });
+  const actionRun = async (env, { keepSession = false } = {}) => {
+    const withInputs = { ...env, HARNESS_INPUTS: JSON.stringify(inputs), ...(keepSession ? { HARNESS_SESSION_KEEP: '1' } : {}) };
+    const resolve = await step('resolve', withInputs);
+    const stateDir = resolve.outputs.state_dir;
+    const prep = await step('prepare', { ...withInputs, HARNESS_STATE_DIR: stateDir });
+    const runRes = prep.outputs.run === 'true' ? await step('run', { ...env, HARNESS_STATE_DIR: stateDir }) : { out: '' };
+    const pub = await step('publish', { ...withInputs, HARNESS_STATE_DIR: stateDir });
+    let runJson = {};
+    try { runJson = JSON.parse(fs.readFileSync(path.join(stateDir, 'run.json'), 'utf8')); } catch {}
+    return { prep, pub, runJson, log: [prep.out, runRes.out, pub.out].join('\n'), stateDir };
+  };
+
+  const sender = { login: 'alice', id: 1, type: 'User' };
+  const first = await actionRun(envFor({ action: 'created', issue, comment: { id: 601, body: '@harness create DONE.md', user: { login: 'alice' } }, sender, repository: { default_branch: 'main' } }, 'first'));
+  const prCall = gh.calls.find((c) => c.method === 'POST' && c.path.endsWith('/pulls'));
+  const checks = [
+    ['run 1: loop ran 2 iterations', first.runJson.iterations?.length === 2],
+    ['run 1: completion check passed', first.runJson.loopResult === 'passed'],
+    ['run 1: final text', /FIRST_DONE/.test(first.runJson.finalText ?? '')],
+    ['run 1: DONE.md committed', gh.calls.some((c) => c.path === '/graphql' && c.body?.variables?.input?.fileChanges?.additions?.some((a) => a.path === 'DONE.md'))],
+    ['run 1: pull request opened with the reply', /FIRST_DONE/.test(prCall?.body?.body ?? '') && /Closes #7/.test(prCall?.body?.body ?? '')],
+    ['run 1: comment links the PR', [...gh.comments.values()].some((c) => /Pull request #21/.test(c.body ?? ''))],
+    ['run 1: publish green', first.pub.code === 0],
+  ];
+  let second = null;
+  if (getAdapterResumable(harness)) {
+    checks.push(['run 1: conversation saved under the PR', /harness-session-v1-.*-pr-21-100-1-\d+$/.test(first.pub.outputs.session_save_key ?? '')]);
+    second = await actionRun(envFor({ action: 'created', issue: { ...issue, number: 21, title: pr.title, pull_request: { url: 'x' } }, comment: { id: 602, body: '@harness are you still there?', user: { login: 'alice' } }, sender, repository: { default_branch: 'main' } }, 'second'), { keepSession: true });
+    checks.push(
+      ['run 2: session resumed', second.runJson.resumed === true],
+      ['run 2: the history carried run 1', /SECOND_WITH_MEMORY/.test(second.runJson.finalText ?? '')],
+      ['run 2: reply says it continued', [...gh.comments.values()].some((c) => /continued the conversation/.test(c.body ?? ''))],
+    );
+  }
+  llm.close();
+  gh.server.close();
+  const failed = checks.filter(([, okc]) => !okc);
+  console.log(`\n${failed.length ? '✗' : '✓'} ${harness} / conversation-loop`);
+  for (const [label, okc] of checks) console.log(`   ${okc ? '✓' : '✗'} ${label}`);
+  if (failed.length) {
+    console.log('----- logs -----');
+    console.log([first.log, second?.log ?? ''].join('\n').split('\n').slice(-90).join('\n'));
+    console.log(`(tmp: ${tmp})`);
+  } else {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  return failed.length === 0;
+}
+
+const getAdapterResumable = (h) => h !== 'claw';
+
 let ok = true;
-for (const h of HARNESSES) for (const s of SCENARIOS) ok = (await scenario(h, s)) && ok;
+for (const h of HARNESSES) {
+  for (const s of SCENARIOS) ok = (s === 'conversation-loop' ? await conversationLoop(h) : await scenario(h, s)) && ok;
+}
 process.exit(ok ? 0 : 1);

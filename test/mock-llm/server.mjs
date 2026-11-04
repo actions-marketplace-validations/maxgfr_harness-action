@@ -63,6 +63,28 @@ export function resolveStep(step, tools) {
   return { text: `MOCK_ERROR no tool matching ${want} among: ${offered.map((x) => x.name).join(', ')}` };
 }
 
+const TURN_MARKER = 'harness-turn';
+
+/**
+ * Index of the step to play: tool rounds so far + earlier TURNS. A turn is a prompt the action
+ * sent (it carries the `<!-- harness-turn -->` marker): the first prompt, a loop iteration, or
+ * the next message of a resumed conversation.
+ */
+export function stepIndex(api, body) {
+  const userTexts = [];
+  if (api === 'responses') {
+    for (const i of Array.isArray(body.input) ? body.input : []) {
+      if (i.role === 'user') userTexts.push(JSON.stringify(i.content ?? ''));
+    }
+  } else {
+    for (const m of body.messages ?? []) if (m.role === 'user') userTexts.push(JSON.stringify(m.content ?? ''));
+  }
+  // Occurrences, not messages: a harness that cannot resume gets the original prompt (with its
+  // marker) restated inside the next turn's message.
+  const turns = userTexts.reduce((n, t) => n + t.split(TURN_MARKER).length - 1, 0);
+  return roundsSoFar(api, body) + Math.max(0, turns - 1);
+}
+
 /** How many tool rounds the conversation already contains. */
 export function roundsSoFar(api, body) {
   if (api === 'responses') {
@@ -176,7 +198,15 @@ export function createMockServer({ steps = [], log, fail = 0 } = {}) {
       if (!api) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"not found"}'); }
       const tools = body.tools ?? [];
       // Side requests (session titles, summaries) come without tools: never consume a step.
-      const out = tools.length ? resolveStep(steps[roundsSoFar(api, body)], tools) : { text: 'harness run' };
+      let out = { text: 'harness run' };
+      if (tools.length) {
+        const step = steps[stepIndex(api, body)];
+        // `expectHistory`: the step only plays if the conversation sent back contains this text,
+        // which proves a resumed session really carries the earlier turns.
+        out = step?.expectHistory && !JSON.stringify(body).includes(step.expectHistory)
+          ? { text: `MOCK_ERROR the history does not contain "${step.expectHistory}"` }
+          : resolveStep(step, tools);
+      }
       if (api === 'responses') return responses(res, body, out);
       if (api === 'anthropic') return anthropic(res, body, out);
       return chat(res, body, out);

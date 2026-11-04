@@ -42,6 +42,7 @@ export function createGitHubMock({ owner = 'acme', repo = 'demo', pr = null, iss
       if (pr && p === `${base}/pulls/${pr.number}/reviews` && req.method === 'POST') return json(200, { id: 77, state: 'COMMENTED' });
       if (/\/commits\/[^/]+\/check-runs$/.test(p)) return json(200, { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', html_url: 'https://example/check' }] });
       if (p === `${base}/git/refs` && req.method === 'POST') return json(201, { ref: body.ref, object: { sha: body.sha } });
+      if (p === `${base}/pulls` && req.method === 'POST') return json(201, { number: 21, html_url: `https://github.com/${owner}/${repo}/pull/21`, head: { ref: body.head }, base: { ref: body.base } });
       json(404, { message: `mock: no route for ${req.method} ${p}` });
     });
   });

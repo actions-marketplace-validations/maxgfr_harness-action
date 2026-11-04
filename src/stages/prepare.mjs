@@ -3,14 +3,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as core from '../core/action.mjs';
-import { readInputs, effectiveTools, splitModel } from '../inputs.mjs';
+import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionCachePrefix } from '../inputs.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
 import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor } from '../modes.mjs';
-import { getAdapter, resolveVersion, permissionProfile, VERSIONS, MCP_SERVER, splitArgs } from '../harness/index.mjs';
+import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../harness/index.mjs';
 import { resolveEndpoint } from '../harness/providers.mjs';
 import { installSkills } from '../skills.mjs';
-import { buildPrompt } from '../prompt.mjs';
+import { buildPrompt, buildFollowupPrompt } from '../prompt.mjs';
 import { git, isRepo, headSha, stripCredentials } from '../git.mjs';
 import { TRACKING_MARKER, stickyMarker, workingBody } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
@@ -18,13 +18,30 @@ import { toolDefinitions } from '../mcp/server.mjs';
 
 const MAX_DIFF = 2 * 1024 * 1024;
 
-async function buildThread({ github, ctx, inputs, isPR }) {
+/** A previous reply of the agent, reduced to what it said (markers, spinner and footer removed). */
+export function previousReply(body) {
+  return String(body)
+    .replace(/<!-- harness-action:[^>]*-->\n?/g, '')
+    .replace(/\n<sub>.*<\/sub>\s*$/s, '')
+    .trim();
+}
+
+async function buildThread({ github, ctx, inputs, isPR, currentCommentId }) {
   const { owner, repo, number } = ctx;
   const entity = isPR ? await github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? (await github.get(`/repos/${owner}/${repo}/issues/${number}`));
   const comments = await github.paginate(`/repos/${owner}/${repo}/issues/${number}/comments`, { max: 300 });
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
-  const keep = (c) => c.user && keepCommentAuthor(c.user.login, inputs) && !String(c.body ?? '').includes(TRACKING_MARKER) && !String(c.body ?? '').includes('<!-- harness-action:sticky:');
-  for (const c of comments.filter(keep)) L.push('', `## @${c.user.login} · ${c.created_at}`, '', c.body ?? '');
+  const ours = (c) => String(c.body ?? '').includes(TRACKING_MARKER) || String(c.body ?? '').includes('<!-- harness-action:sticky:');
+  const keep = (c) => c.user && keepCommentAuthor(c.user.login, inputs) && !ours(c);
+  for (const c of comments) {
+    if (c.id === currentCommentId) continue;
+    // The agent's own earlier replies are part of the conversation.
+    if (ours(c)) {
+      if (!/is working…/.test(c.body ?? '')) L.push('', `## you (harness, earlier reply) · ${c.created_at}`, '', previousReply(c.body));
+    } else if (keep(c)) {
+      L.push('', `## @${c.user.login} · ${c.created_at}`, '', c.body ?? '');
+    }
+  }
   if (isPR) {
     const reviews = await github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 });
     const kept = reviews.filter(keep);
@@ -49,7 +66,10 @@ async function ciStatus(github, ctx, sha) {
 export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const inputs = readInputs(env);
   const ctx = readContext(env);
-  const workDir = path.resolve(env.GITHUB_WORKSPACE || process.cwd(), inputs.workingDirectory);
+  // Real path: OpenCode 2 keys MCP tools by directory and resolves symlinks (/var → /private/var
+  // on macOS), so a symlinked working directory would get no MCP tools at all.
+  const workDirRaw = path.resolve(env.GITHUB_WORKSPACE || process.cwd(), inputs.workingDirectory);
+  const workDir = fs.existsSync(workDirRaw) ? fs.realpathSync(workDirRaw) : workDirRaw;
   fs.mkdirSync(stateDir, { recursive: true });
   const save = (name, data) => fs.writeFileSync(path.join(stateDir, name), typeof data === 'string' ? data : JSON.stringify(data, null, 2));
 
@@ -71,8 +91,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   }
   core.info(`Mode: ${modeInfo.mode} (${modeInfo.reason}); ${access.reason}.`);
 
-  const adapter = getAdapter(inputs.harness);
-  const version = resolveVersion(inputs.harness, inputs.harnessVersion);
+  const { adapter, adapterId, meta, version } = resolveHarness(inputs.harness, inputs.harnessVersion);
+  const loop = loopSettings(inputs);
+  const thread0 = sessionThread(inputs, ctx, modeInfo.mode);
   const tools = effectiveTools(inputs.tools, modeInfo.mode);
   const perms = permissionProfile(tools, inputs.allowBash);
   const model = { ...splitModel(inputs.model), raw: inputs.model };
@@ -90,12 +111,18 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       github.post(`/repos/${ctx.owner}/${ctx.repo}/pulls/comments/${ctx.comment.id}/reactions`, { content: 'eyes' }).catch(() => {});
     }
     const body = workingBody({ harness: inputs.harness, model: inputs.model, runUrl: ctx.runUrl, sticky });
-    if (sticky) {
-      const existing = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 })).find((c) => c.body?.includes(sticky));
-      if (existing) { await github.patch(`/repos/${ctx.owner}/${ctx.repo}/issues/comments/${existing.id}`, { body }); trackingCommentId = existing.id; }
+    try {
+      if (sticky) {
+        const existing = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 })).find((c) => c.body?.includes(sticky));
+        if (existing) { await github.patch(`/repos/${ctx.owner}/${ctx.repo}/issues/comments/${existing.id}`, { body }); trackingCommentId = existing.id; }
+      }
+      if (!trackingCommentId) trackingCommentId = (await github.post(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { body })).id;
+      core.info(`Tracking comment: ${trackingCommentId}`);
+    } catch (err) {
+      if (err.status !== 403 && err.status !== 404) throw err;
+      // A comment is a nicety: without `issues: write` / `pull-requests: write`, report in the job summary.
+      core.warning(`Cannot comment on #${ctx.number} (${err.status}): grant \`issues: write\` and \`pull-requests: write\` for the tracking comment. The result goes to the job summary.`);
     }
-    if (!trackingCommentId) trackingCommentId = (await github.post(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { body })).id;
-    core.info(`Tracking comment: ${trackingCommentId}`);
   }
 
   try {
@@ -104,7 +131,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     let changedFiles = [];
     let thread = null;
     if (ctx.number && (modeInfo.mode === 'tag' || isPR)) {
-      const t = await buildThread({ github, ctx, inputs, isPR });
+      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId });
       thread = t.markdown;
       save('thread.md', thread);
       if (isPR) {
@@ -118,7 +145,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
 
     // Commit target decided now, so the right branch is checked out before credentials go away.
     let commitMode = inputs.commitMode;
-    if (commitMode === 'auto') commitMode = modeInfo.mode === 'tag' ? (isPR ? 'pr-branch' : 'new-branch') : 'none';
+    if (commitMode === 'auto') commitMode = modeInfo.mode === 'tag' ? (isPR ? 'pr-branch' : 'new-branch') : inputs.openPr ? 'new-branch' : 'none';
     if (!perms.edit) commitMode = 'none';
     if (commitMode === 'pr-branch' && (!pr || pr.isFork)) {
       core.warning(pr?.isFork ? 'The pull request comes from a fork: changes cannot be pushed to it; they are saved as a patch.' : 'commit_mode pr-branch needs a pull request; changes are saved as a patch.');
@@ -143,7 +170,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const home = path.join(stateDir, 'home');
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(path.join(home, '.gitconfig'), '[safe]\n\tdirectory = *\n[init]\n\tdefaultBranch = main\n');
-    const bin = await core.group(`Install ${inputs.harness}@${String(version).slice(0, 12)}`, () => adapter.install({ version, toolsDir, log: core.info, meta: VERSIONS[inputs.harness] }));
+    const bin = await core.group(`Install ${inputs.harness}@${String(version).slice(0, 12)}`, () => adapter.install({ version, toolsDir, log: core.info, meta }));
     const skills = await core.group('Install skills', () => {
       const list = installSkills({ sources: inputs.skills, home, workDir, token: inputs.skillsToken || inputs.githubToken, tmpDir: stateDir, log: core.info });
       for (const s of list) core.info(`• ${s.name} (${s.source})`);
@@ -152,7 +179,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     });
     if (inputs.skill && !skills.some((s) => s.name === inputs.skill)) throw new Error(`Input skill "${inputs.skill}" is not installed (installed: ${skills.map((s) => s.name).join(', ') || 'none'})`);
 
-    const mcpState = { isPR: Boolean(pr), ciStatus: Boolean(ci), schema: inputs.jsonSchema ?? null };
+    const mcpState = { isPR: Boolean(pr), ciStatus: Boolean(ci), schema: inputs.jsonSchema ?? null, loop: loop.maxIterations > 1 && !loop.until };
     save('mcp.json', mcpState);
     const mcpToolNames = toolDefinitions(mcpState).map((t) => t.name);
     const mcpServers = { ...(inputs.mcpConfig ?? {}), harness: { command: process.execPath, args: [MCP_SERVER], env: { HARNESS_STATE: stateDir } } };
@@ -164,7 +191,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
 
     // --- prompt ---------------------------------------------------------------------------------
     const triggerComment = ctx.eventName === 'pull_request_review_comment' ? { path: ctx.comment?.path, line: ctx.comment?.line, diffHunk: ctx.comment?.diff_hunk } : null;
-    const prompt = buildPrompt({
+    const promptArgs = {
+      loop,
       harness: inputs.harness,
       mode: modeInfo.mode,
       ctx,
@@ -182,9 +210,20 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       schema: inputs.jsonSchema,
       allowBash: inputs.allowBash,
       commitMode,
-    });
-    save('prompt.md', prompt);
+      openPr: inputs.openPr,
+    };
+    save('prompt.md', buildPrompt(promptArgs));
+    // A resumed session already knows the setup: it only gets the new message.
+    save('followup.md', buildFollowupPrompt(promptArgs));
     fs.copyFileSync(path.join(stateDir, 'prompt.md'), path.join(reportDir, 'prompt.md'));
+
+    // --- conversation (restored by the cache step that follows) ----------------------------------
+    const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
+    if (thread0) {
+      if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
+      fs.mkdirSync(sessionDir, { recursive: true });
+      core.info(`Conversation: ${thread0}${adapter.resumable ? '' : ` (${inputs.harness} cannot resume a session: earlier replies are given as context)`}.`);
+    }
 
     // --- remove persisted git credentials for the agent run --------------------------------------
     const removedCredentials = repoOk ? stripCredentials(workDir) : null;
@@ -193,6 +232,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     // Token-free plan for the run stage.
     save('plan.json', {
       harness: inputs.harness,
+      adapterId,
+      loop,
+      session: { enabled: Boolean(thread0), dir: thread0 ? sessionDir : '', thread: thread0 },
       version,
       bin,
       workDir,
@@ -219,8 +261,17 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       branchName: repoOk ? (git(['rev-parse', '--abbrev-ref', 'HEAD'], workDir).trim()) : '',
       removedCredentials,
       skills: skills.map((s) => ({ name: s.name, source: s.source })),
+      adapterId,
+      loop,
+      session: { thread: thread0, dir: thread0 ? sessionDir : '' },
+      openPr: inputs.openPr,
     });
-    return { run: true, mode: modeInfo.mode };
+    return {
+      run: true,
+      mode: modeInfo.mode,
+      sessionDir: thread0 ? sessionDir : '',
+      sessionRestorePrefix: thread0 ? sessionCachePrefix(adapterId, thread0) : '',
+    };
   } catch (err) {
     // The tracking comment must not stay "working…" forever.
     if (trackingCommentId) {

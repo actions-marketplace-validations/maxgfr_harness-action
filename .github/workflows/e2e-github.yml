@@ -1,18 +1,31 @@
 name: E2E (real GitHub API)
 
-# The action against the REAL GitHub API (comments, reactions, reviews, branches, signed commits)
-# with the scripted mock LLM: comment `@harness-e2e` on an issue or a pull request of this repo.
+# The action against the REAL GitHub API (comments, reactions, reviews, branches, signed commits,
+# pull requests, the conversation cache) with the scripted mock LLM:
+#   - comment `@harness-e2e [harness=<name>]` on an issue or a pull request of this repository;
+#     comment again with `expect=resumed` to check that the conversation is resumed;
+#   - or run it from the Actions tab (workflow_dispatch): prompt → pull request (open_pr).
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: 'opencode | opencode-v1 | codex | pi | claw'
+        required: false
+        default: 'opencode'
+      prompt:
+        description: 'Prompt (the mock LLM ignores it)'
+        required: false
+        default: 'Create ECHO.md'
 
 jobs:
   e2e:
-    if: contains(github.event.comment.body, '@harness-e2e')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.comment.body, '@harness-e2e')
     runs-on: ubuntu-latest
-    # one run per issue / PR at a time: pushes to a PR branch must not race
+    # one run per conversation at a time: pushes to a PR branch and cache saves must not race
     concurrency:
-      group: e2e-github-${{ github.event.issue.number }}
+      group: e2e-github-${{ github.event.issue.number || github.run_id }}
       cancel-in-progress: false
     permissions:
       contents: write
@@ -24,10 +37,12 @@ jobs:
       - name: Which harness
         id: pick
         env:
-          BODY: ${{ github.event.comment.body }}
+          BODY: ${{ github.event.comment.body || format('harness={0}', inputs.harness) }}
         run: |
-          h=$(printf '%s' "$BODY" | grep -oE 'harness=(opencode|codex|pi|claw)' | head -1 | cut -d= -f2)
-          echo "harness=${h:-opencode}" >> "$GITHUB_OUTPUT"
+          h=$(printf '%s' "$BODY" | grep -oE 'harness=(opencode-v1|opencode|codex|pi|claw)' | head -1 | cut -d= -f2)
+          h=${h:-opencode}
+          if [ "$h" = opencode-v1 ]; then echo "harness=opencode" >> "$GITHUB_OUTPUT"; echo "version=1" >> "$GITHUB_OUTPUT"; else echo "harness=$h" >> "$GITHUB_OUTPUT"; echo "version=" >> "$GITHUB_OUTPUT"; fi
+          if printf '%s' "$BODY" | grep -q 'expect=resumed'; then echo "expect=resumed" >> "$GITHUB_OUTPUT"; else echo "expect=new" >> "$GITHUB_OUTPUT"; fi
       - name: Start the mock LLM
         env:
           SCRIPT: ${{ github.event.issue.pull_request && 'test/e2e/github-pr-script.json' || 'test/e2e/github-issue-script.json' }}
@@ -43,19 +58,27 @@ jobs:
           MOCK_API_KEY: mock
         with:
           harness: ${{ steps.pick.outputs.harness }}
+          harness_version: ${{ steps.pick.outputs.version }}
           model: mock/mock-model
           base_url: http://127.0.0.1:4010/v1
           api_key_env: MOCK_API_KEY
           trigger_phrase: '@harness-e2e'
+          prompt: ${{ inputs.prompt }}
+          open_pr: ${{ github.event_name == 'workflow_dispatch' }}
           tools: full
           skills: ./test/fixtures/skills
           timeout_minutes: '5'
           on_agent_error: fail
       - name: Check the outputs
         env:
+          EVENT: ${{ github.event_name }}
+          EXPECT: ${{ steps.pick.outputs.expect }}
           CONCLUSION: ${{ steps.harness.outputs.conclusion }}
           BRANCH: ${{ steps.harness.outputs.branch_name }}
+          RESUMED: ${{ steps.harness.outputs.resumed }}
+          PR_URL: ${{ steps.harness.outputs.pr_url }}
         run: |
-          echo "conclusion=$CONCLUSION branch=$BRANCH"
+          echo "event=$EVENT expect=$EXPECT conclusion=$CONCLUSION branch=$BRANCH resumed=$RESUMED pr=$PR_URL"
           test "$CONCLUSION" = success
-          test -n "$BRANCH"
+          if [ "$EXPECT" = resumed ]; then test "$RESUMED" = true; else test -n "$BRANCH"; fi
+          if [ "$EVENT" = workflow_dispatch ]; then test -n "$PR_URL"; fi

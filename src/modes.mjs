@@ -46,14 +46,15 @@ export function detectMode(ctx, inputs) {
       } else if (ctx.action === 'labeled' && inputs.labelTrigger && p.label?.name?.toLowerCase() === inputs.labelTrigger.toLowerCase()) {
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `label "${inputs.labelTrigger}" applied`;
-      } else if (['opened', 'edited'].includes(ctx.action) && (containsTrigger(p.issue?.body, phrase) || containsTrigger(p.issue?.title, phrase))) {
+      } else if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && (containsTrigger(p.issue?.body, phrase) || containsTrigger(p.issue?.title, phrase))) {
+        // (with a prompt, an issue / PR event is an automation: the body is context, not a request)
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `issue mentions ${phrase}`;
       }
       break;
     case 'pull_request':
     case 'pull_request_target':
-      if (['opened', 'edited'].includes(ctx.action) && containsTrigger(p.pull_request?.body, phrase)) {
+      if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && containsTrigger(p.pull_request?.body, phrase)) {
         triggerText = `${p.pull_request.title}\n\n${p.pull_request.body ?? ''}`;
         reason = `pull request mentions ${phrase}`;
       }

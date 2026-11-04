@@ -2,7 +2,9 @@
 
 **Run a real coding-agent harness in GitHub Actions — any model, any Agent Skill.**
 
-`harness-action` drives an open-source agent harness — **[OpenCode](https://opencode.ai)**, **[Codex](https://github.com/openai/codex)**, **[Pi](https://pi.dev)** or **[claw-code](https://github.com/ultraworkers/claw-code)** — inside your workflow, with the model and provider you choose, and the [Agent Skills](https://agentskills.io) (`SKILL.md`) you point it at. It does what you expect from an agent action — `@mention` it on an issue or a PR, it replies, tracks its progress, pushes **signed** commits, posts reviews, and reports results — without being tied to one vendor's model.
+`harness-action` drives an open-source agent harness — **[OpenCode](https://opencode.ai)** (2.x, or 1.x), **[Codex](https://github.com/openai/codex)**, **[Pi](https://pi.dev)** or **[claw-code](https://github.com/ultraworkers/claw-code)** — inside your workflow, with the model and provider you choose, and the [Agent Skills](https://agentskills.io) (`SKILL.md`) you point it at. It does what you expect from an agent action — `@mention` it on an issue or a PR, it replies, tracks its progress, pushes **signed** commits, posts reviews, and reports results — without being tied to one vendor's model.
+
+And you can **talk to it like you talk to your local coding agent**: every mention in the same thread continues the **same session** (it remembers what it did), it can **loop until your tests pass**, and a prompt typed in the Actions tab (or `gh workflow run`) comes back as a **pull request** you keep chatting with.
 
 ```yaml
 - uses: maxgfr/harness-action@v1
@@ -102,15 +104,68 @@ jobs:
 
 More in [docs/recipes.md](docs/recipes.md).
 
+## Talk to it like your local agent
+
+### A conversation per issue / pull request
+
+`session: auto` is the default: each `@harness` mention on the same issue or PR **resumes the same harness session**, with its full memory of earlier turns, files read and tool results. The session is saved with the Actions cache, one per harness and thread, and restored on the next mention. A resumed session gets a short follow-up prompt instead of the whole setup again.
+
+```text
+@harness add a --json flag to the CLI          → branch + commit + reply
+@harness also document it in the README        → same session: it knows what "it" is
+```
+
+OpenCode (export/import), Codex (`exec resume`) and Pi (`--session`) resume natively. claw-code cannot, so it gets its earlier replies as context, as every harness also does. `session: off` starts fresh each time. `session_key` names a conversation explicitly.
+
+### Loop until it is done
+
+```yaml
+with:
+  loop_until: npm test        # "done" means this command succeeds
+  max_iterations: '5'         # default 5 with loop_until
+```
+
+After each turn, the action runs `loop_until`. If it fails, the agent is re-prompted **in the same session** with the command's output, until it passes or `max_iterations` is reached. The run fails if it never passes, subject to `on_agent_error`. Without `loop_until`, `max_iterations: N` keeps the agent going until it calls the `task_complete` tool. `max_steps`, `timeout_minutes` and `budget_usd` cover the whole loop.
+
+### A prompt that comes back as a pull request
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      prompt: { description: 'What should the agent do?', required: true }
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write, issues: write }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: maxgfr/harness-action@v1
+        env: { ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}' }
+        with:
+          model: anthropic/claude-sonnet-5-5
+          prompt: ${{ inputs.prompt }}
+          tools: edit
+          open_pr: true          # new branch + pull request, the reply as its description
+          loop_until: npm test
+```
+
+```bash
+gh workflow run agent.yml -f prompt="Add rate limiting to the /login route"
+```
+
+The pull request carries the conversation: mention `@harness` on it (with the tag-mode workflow above) and the same session continues. This repository dogfoods all of it in [`.github/workflows/harness.yml`](.github/workflows/harness.yml).
+
 ## Harnesses
 
 | | OpenCode | Codex | Pi | claw-code |
 |---|---|---|---|---|
 | Status | **default**, stable | stable | stable | experimental |
-| Install | npm `opencode-ai` | npm `@openai/codex` | npm `@earendil-works/pi-coding-agent` | built from source (cargo, ~1 min, cached) |
+| Install | npm `@opencode/cli` (OpenCode 2); `harness_version: 1` → `opencode-ai` (OpenCode 1) | npm `@openai/codex` | npm `@earendil-works/pi-coding-agent` | built from source (cargo, ~1 min, cached) |
 | Providers | ~75 built in + any OpenAI/Anthropic-compatible | OpenAI + any OpenAI-compatible (Responses API) | ~15 built in + any compatible | Anthropic, OpenAI-compatible, xAI, DashScope, Ollama |
 | `allow_bash` patterns | ✅ enforced per pattern | sandboxed shell instead | bash all-or-nothing | needs `tools: full` |
 | Cost reported (`budget_usd`) | ✅ | ❌ (step / time limits only) | ✅ | ✅ (after the run) |
+| Resumes a session (conversation, loop) | ✅ export / import | ✅ `exec resume` | ✅ `--session` | ❌ earlier replies as context |
 | Live event stream | ✅ | ✅ | ✅ | one JSON at the end |
 
 Every harness gets the same skills, the same `harness` MCP server and the same prompt contract. [docs/harnesses.md](docs/harnesses.md) lists the details and quirks of each one. Versions are pinned (`src/harness/versions.json`) and tested in CI; override them with `harness_version`.
@@ -138,6 +193,7 @@ The **`harness` MCP server** is served to every harness. It is zero-dependency, 
 | `add_inline_comment` | PR review comment, posted as one review at the end; lines outside the diff move to the reply |
 | `read_thread`, `get_pr_diff`, `get_ci_status` | context fetched before the run |
 | `submit_structured_output` | the result for `json_schema`, with the schema as its input schema |
+| `task_complete` | loop mode without `loop_until`: the agent declares the task done |
 
 Extra MCP servers: `mcp_config` takes one portable JSON shape for every harness.
 
@@ -147,9 +203,12 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 
 | input | default | |
 |---|---|---|
-| `harness` | `opencode` | `opencode`, `codex`, `pi`, `claw` |
+| `harness` · `harness_version` | `opencode` · pinned | `opencode` (2.x; `1` for OpenCode 1), `codex`, `pi`, `claw` |
 | `model` | — (required) | `provider/model` |
 | `prompt` | — | set → automation mode; empty → tag mode (`@harness`, label, assignee) |
+| `session` · `session_key` | `auto` · — | conversation memory per issue / PR (`on`, `off`), or a named conversation |
+| `loop_until` · `max_iterations` | — · 1 (5 with `loop_until`) | loop until a command passes / until `task_complete` |
+| `open_pr` | `false` | open a pull request with the changes and the reply |
 | `skills` / `skill` | — | skill sources (one per line) / the skill to use |
 | `tools` | `auto` | `read-only`, `edit`, `full` (`auto`: tag → edit, automation → read-only) |
 | `allow_bash` | — | shell commands allowed at `edit` |
@@ -162,7 +221,7 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 | `max_steps` · `timeout_minutes` · `budget_usd` | `200` · `30` · — | limits of an unattended run |
 | `harness_args` · `harness_config` · `mcp_config` | — | escape hatches |
 
-**Outputs:** `conclusion`, `mode`, `structured_output`, `findings_count`, `branch_name`, `session_id`, `cost_usd`, `execution_file`, `report_dir`.
+**Outputs:** `conclusion`, `mode`, `structured_output`, `findings_count`, `branch_name`, `pr_number`, `pr_url`, `session_id`, `resumed`, `iterations`, `cost_usd`, `execution_file`, `report_dir`.
 
 ## Coming from claude-code-action
 
@@ -177,6 +236,8 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 | `claude_args` / `settings` | `harness_args` / `harness_config` |
 | `--json-schema` → `structured_output` | `json_schema` → `structured_output` |
 | `allowed_bots`, `allowed_non_write_users`, `include/exclude_comments_by_actor` | same |
+| each mention starts a new session | each mention **continues** the thread's session (`session`) |
+| — | `loop_until` / `max_iterations`, `open_pr` |
 | Claude only | any harness × any provider |
 
 Not in v1: OIDC exchange for a hosted GitHub App (pass your own App token as `github_token` instead), and live progress updates while the agent runs. The checklist is published when the run ends, because no token is available during the run.
@@ -189,7 +250,9 @@ node test/e2e/run.mjs                      # real harnesses × scripted mock LLM
 node test/e2e/run.mjs --harness pi --scenario pr-automation
 ```
 
-CI runs both on every push, plus a smoke test of `action.yml` itself (`uses: ./`). `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits): comment `@harness-e2e harness=pi` on an issue or a PR of this repository. `e2e-live.yml` runs real models (manual, needs provider secrets).
+The scenarios are `issue-tag`, `pr-automation` and `conversation-loop` (two runs: a loop that opens a PR, then a mention on it that must resume the session). Harnesses: `opencode`, `opencode-v1`, `codex`, `pi`, `claw`.
+
+CI runs both on every push, plus `action.yml` itself (`uses: ./`): a smoke test, and a loop + conversation test that goes through the **real** Actions cache. `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits, pull requests): comment `@harness-e2e harness=pi` on an issue or a PR of this repository (`expect=resumed` on a second comment), or run it from the Actions tab for the prompt → PR flow. `e2e-live.yml` runs real models (manual, needs provider secrets).
 
 The e2e suite needs no API key. `test/mock-llm` speaks the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages APIs and replays a script, whatever harness is on the other end. `test/mock-github` records the comments, reviews, refs and GraphQL commits.
 

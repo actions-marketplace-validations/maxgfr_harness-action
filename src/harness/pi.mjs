@@ -52,15 +52,37 @@ export default {
     }
     if (perms.bash === 'allowlist') warn?.('pi cannot restrict bash to allow_bash patterns: the bash tool is enabled as a whole.');
     const modelArgs = provider ? ['--provider', provider, '--model', model.id] : ['--model', model.id];
+    const sessionDir = path.join(stateDir, 'pi-sessions');
+    fs.mkdirSync(sessionDir, { recursive: true });
     return {
       env: { PI_CODING_AGENT_DIR: agentDir, PI_SKIP_VERSION_CHECK: '1' },
       args: [...modelArgs, '--tools', toolList(perms).join(',')],
+      sessionDir,
       files: Object.fromEntries(Object.entries(files).map(([k, v]) => [`pi-${k}`, typeof v === 'string' ? v : JSON.stringify(v, null, 2)])),
     };
   },
 
-  command({ prepared, prompt, extraArgs }) {
-    return { args: ['--mode', 'json', '--no-session', ...prepared.args, ...extraArgs, prompt], stdin: null };
+  // Sessions live in a private --session-dir, so a loop iteration or a later run can reopen
+  // the same session by id.
+  command({ prepared, prompt, extraArgs, sessionId }) {
+    return { args: ['--mode', 'json', '--session-dir', prepared.sessionDir, ...(sessionId ? ['--session', sessionId] : []), ...prepared.args, ...extraArgs, prompt], stdin: null };
+  },
+
+  resumable: true,
+
+  async importSession({ dir, prepared }) {
+    const saved = path.join(dir, 'pi-sessions');
+    const meta = path.join(dir, 'meta.json');
+    if (!fs.existsSync(saved) || !fs.existsSync(meta)) return null;
+    fs.cpSync(saved, prepared.sessionDir, { recursive: true });
+    return JSON.parse(fs.readFileSync(meta, 'utf8')).sessionId ?? null;
+  },
+
+  async exportSession({ dir, prepared }) {
+    if (!fs.existsSync(prepared.sessionDir)) return false;
+    fs.rmSync(path.join(dir, 'pi-sessions'), { recursive: true, force: true });
+    fs.cpSync(prepared.sessionDir, path.join(dir, 'pi-sessions'), { recursive: true });
+    return true;
   },
 
   parse(obj) {

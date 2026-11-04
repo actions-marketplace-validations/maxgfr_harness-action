@@ -9,7 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import * as core from './core/action.mjs';
 import { readInputs } from './inputs.mjs';
-import { resolveVersion, VERSIONS } from './harness/index.mjs';
+import { resolveHarness } from './harness/index.mjs';
 
 function loadInputs(env) {
   if (!env.HARNESS_INPUTS) return env;
@@ -23,23 +23,25 @@ function loadInputs(env) {
 async function main() {
   const cmd = process.argv[2];
   const env = loadInputs(process.env);
-  const tmp = env.RUNNER_TEMP || os.tmpdir();
+  // Real path, like the working directory (see prepare): no symlink in any path a harness sees.
+  const tmpRaw = env.RUNNER_TEMP || os.tmpdir();
+  const tmp = fs.existsSync(tmpRaw) ? fs.realpathSync(tmpRaw) : tmpRaw;
 
   if (cmd === 'resolve') {
     const inputs = readInputs(env);
     for (const secret of [inputs.githubToken, inputs.skillsToken]) core.mask(secret);
-    const version = resolveVersion(inputs.harness, inputs.harnessVersion);
+    const { version, meta, adapterId } = resolveHarness(inputs.harness, inputs.harnessVersion);
     const id = `${env.GITHUB_RUN_ID || 'local'}-${env.GITHUB_RUN_ATTEMPT || '1'}-${crypto.randomBytes(3).toString('hex')}`;
     const stateDir = path.join(tmp, 'harness-action', id);
     const toolsDir = path.join(tmp, 'harness-action-tools');
     fs.mkdirSync(stateDir, { recursive: true });
-    const bin = VERSIONS[inputs.harness].bin;
+    const bin = meta.bin;
     core.setOutput('state_dir', stateDir);
     core.setOutput('tools_dir', toolsDir);
     core.setOutput('harness', inputs.harness);
     core.setOutput('version', version);
     core.setOutput('cache_path', path.join(toolsDir, `${bin}-${version}`));
-    core.setOutput('cache_key', `harness-action-v1-${env.RUNNER_OS || process.platform}-${env.RUNNER_ARCH || process.arch}-${inputs.harness}-${version}`);
+    core.setOutput('cache_key', `harness-action-v1-${env.RUNNER_OS || process.platform}-${env.RUNNER_ARCH || process.arch}-${adapterId}-${version}`);
     core.setOutput('artifact_name', `harness-${(env.GITHUB_JOB || 'job').replace(/[^\w-]/g, '-')}-${inputs.harness}-${id.split('-').pop()}`);
     return 0;
   }
@@ -52,6 +54,8 @@ async function main() {
     const res = await prepare({ env, stateDir, toolsDir: env.HARNESS_TOOLS_DIR || path.join(tmp, 'harness-action-tools') });
     core.setOutput('run', String(res.run));
     core.setOutput('mode', res.mode);
+    core.setOutput('session_dir', res.sessionDir ?? '');
+    core.setOutput('session_restore_prefix', res.sessionRestorePrefix ?? '');
     return 0;
   }
   if (cmd === 'run') {

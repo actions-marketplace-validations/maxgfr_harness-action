@@ -93,6 +93,14 @@ export function toolDefinitions(cfg) {
       run: () => readText('ci.json') ?? 'CI status is not available.',
     });
   }
+  if (cfg.loop) {
+    tools.push({
+      name: 'task_complete',
+      description: 'Declare that the task is fully done (and verified). Call it once, at the very end. Until you call it, you will be asked to continue.',
+      inputSchema: { type: 'object', properties: { summary: str('What was done') }, required: ['summary'] },
+      run: ({ summary }) => { enqueue('complete', { summary: String(summary ?? '') }); return 'Task marked as complete.'; },
+    });
+  }
   if (cfg.schema) {
     tools.push({
       name: 'submit_structured_output',

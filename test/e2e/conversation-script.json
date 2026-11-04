@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "text": "FIRST_TURN — not done yet." },
+    { "shell": "touch DONE.md" },
+    { "text": "FIRST_DONE — DONE.md exists now." },
+    { "text": "SECOND_WITH_MEMORY — I remember the first run.", "expectHistory": "FIRST_DONE" }
+  ]
+}

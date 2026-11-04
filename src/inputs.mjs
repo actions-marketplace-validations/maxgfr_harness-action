@@ -55,6 +55,13 @@ export function readInputs(env = process.env) {
     budgetUsd: positiveNumber('budget_usd', getInput('budget_usd', o), 0),
     jsonSchema: parseJsonInput('json_schema', getInput('json_schema', o)),
 
+    // conversation + loop
+    session: oneOf('session', getInput('session', o) || 'auto', ['auto', 'on', 'off']),
+    sessionKey: getInput('session_key', o).replace(/[^\w.-]+/g, '-').slice(0, 100),
+    maxIterations: Math.floor(positiveNumber('max_iterations', getInput('max_iterations', o), 0)) || 0,
+    loopUntil: getInput('loop_until', { ...o, trim: false }).trim(),
+    openPr: getBool('open_pr', false, o),
+
     // triggers (tag mode)
     triggerPhrase: getInput('trigger_phrase', o) || '@harness',
     labelTrigger: getInput('label_trigger', o) || 'harness',
@@ -93,6 +100,30 @@ export function effectiveTools(tools, mode) {
   if (tools !== 'auto') return tools;
   return mode === 'tag' ? 'edit' : 'read-only';
 }
+
+/** Loop settings: `loop_until` alone means up to 5 iterations; no loop by default. */
+export function loopSettings(inputs) {
+  const maxIterations = inputs.maxIterations || (inputs.loopUntil ? 5 : 1);
+  return { maxIterations, until: inputs.loopUntil || '' };
+}
+
+/**
+ * The conversation an agent run belongs to, or null. `auto`: an issue / PR conversation in tag
+ * mode, or an explicit `session_key`; `on`: also automation runs on an issue / PR.
+ */
+export function sessionThread(inputs, ctx, mode) {
+  if (inputs.session === 'off' || mode === 'skip') return null;
+  if (inputs.sessionKey) return inputs.sessionKey;
+  // A prompt that opens a PR starts a conversation: it is saved under that PR, so mentioning
+  // the trigger phrase there continues it.
+  if (!ctx.number && mode === 'automation' && inputs.openPr) return `run-${ctx.runId || Date.now()}`;
+  if (!ctx.number) return null;
+  if (mode === 'tag' || inputs.session === 'on') return `${ctx.isPR ? 'pr' : 'issue'}-${ctx.number}`;
+  return null;
+}
+
+/** Cache key prefix of a conversation: one per harness and issue / PR (or session_key). */
+export const sessionCachePrefix = (adapterId, thread) => `harness-session-v1-${adapterId}-${thread}-`;
 
 /** "provider/model" → { provider, id }. A bare id keeps the harness default provider. */
 export function splitModel(model) {

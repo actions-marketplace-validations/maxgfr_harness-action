@@ -35,6 +35,11 @@ test('mode detection', () => {
   assert.equal(detectMode(ctx('issues', 'assigned', { assignee: { login: 'bot' }, issue: { title: 't' } }), inputs({ assignee_trigger: '@bot' })).mode, 'tag');
   assert.equal(detectMode(ctx('push', '', {}), inputs({ prompt: 'x' })).mode, 'automation');
   assert.equal(detectMode(ctx('push', '', {}), inputs()).mode, 'skip');
+  // a PR / issue body mentioning the phrase is a request only without a prompt
+  const prBody = { pull_request: { title: 't', body: 'cc @harness' } };
+  assert.equal(detectMode(ctx('pull_request', 'opened', prBody), inputs()).mode, 'tag');
+  assert.equal(detectMode(ctx('pull_request', 'opened', prBody), inputs({ prompt: 'review' })).mode, 'automation');
+  assert.equal(detectMode(ctx('issue_comment', 'created', { comment: { body: '@harness go' } }), inputs({ prompt: 'extra' })).mode, 'tag');
 });
 
 test('inputs: validation and defaults', () => {

@@ -26,6 +26,10 @@ On top of that:
 - **The workspace and the runner filesystem**, read-only or not, depending on the harness. Do not put secrets on disk before the action runs.
 - **Network access**, depending on the harness and the level: OpenCode `webfetch` and the Codex sandbox network are off below `full`. A shell command can still reach the network when bash is allowed.
 
+## Conversations (the session cache)
+
+With `session` on (the default in tag mode), the harness session is saved with the Actions cache under `harness-session-v1-<harness>-<issue|pr>-<n>-…`. It holds the transcript: prompts, replies, and the tool calls and outputs the agent made. Caches of the default branch can be restored by any workflow of the repository, including pull requests from forks. So on a **public** repository, treat a conversation as being as public as the code. In particular, don't let the agent print secrets in a session you resume. Use `session: off` if your conversations can hold sensitive data. The restored session is read by the run step only, which has no token.
+
 ## Who can trigger it
 
 In tag mode, and for comment events, the actor must have **write** access to the repository. Bots are refused unless listed in `allowed_bots`. `allowed_non_write_users` opens the agent to anyone you list (`*` = everyone): only do that with `tools: read-only` and no `commit_mode`.

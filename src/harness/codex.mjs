@@ -51,11 +51,32 @@ export default {
     if (!opts.endpoint.custom && (!opts.endpoint.provider || opts.endpoint.provider === 'openai') && !process.env.CODEX_API_KEY && process.env.OPENAI_API_KEY) {
       env.CODEX_API_KEY = '$env:OPENAI_API_KEY';
     }
-    return { env, files: { 'codex-config.toml': toml } };
+    return { env, codexHome, files: { 'codex-config.toml': toml } };
   },
 
-  command({ prompt, extraArgs, workDir }) {
-    return { args: ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', workDir, ...extraArgs, '-'], stdin: prompt };
+  // Sessions are kept (no --ephemeral) in the private CODEX_HOME, so a loop iteration or a
+  // later run can `exec resume` the same thread.
+  command({ prompt, extraArgs, workDir, sessionId }) {
+    const base = ['exec', '--json', '--skip-git-repo-check', '-C', workDir, ...extraArgs];
+    return { args: sessionId ? [...base, 'resume', sessionId, '-'] : [...base, '-'], stdin: prompt };
+  },
+
+  resumable: true,
+
+  async importSession({ dir, prepared }) {
+    const saved = path.join(dir, 'codex-sessions');
+    const meta = path.join(dir, 'meta.json');
+    if (!fs.existsSync(saved) || !fs.existsSync(meta)) return null;
+    fs.cpSync(saved, path.join(prepared.codexHome, 'sessions'), { recursive: true });
+    return JSON.parse(fs.readFileSync(meta, 'utf8')).sessionId ?? null;
+  },
+
+  async exportSession({ dir, prepared }) {
+    const sessions = path.join(prepared.codexHome, 'sessions');
+    if (!fs.existsSync(sessions)) return false;
+    fs.rmSync(path.join(dir, 'codex-sessions'), { recursive: true, force: true });
+    fs.cpSync(sessions, path.join(dir, 'codex-sessions'), { recursive: true });
+    return true;
   },
 
   parse(obj) {

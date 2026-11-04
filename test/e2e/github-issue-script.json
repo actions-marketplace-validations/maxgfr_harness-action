@@ -2,7 +2,8 @@
   "steps": [
     { "tool": "update_progress", "args": { "markdown": "- [x] read the request\n- [x] create ECHO.md" } },
     { "tool": "report_finding", "args": { "file": "README.md", "line": 1, "severity": "notice", "message": "echo-check ran" } },
-    { "shell": "printf 'echo-check ran\\n' > ECHO.md" },
-    { "text": "ECHO_DONE — I created `ECHO.md`." }
+    { "shell": "printf 'echo-check ran at %s\\n' \"$(date +%s%N)\" > ECHO.md" },
+    { "text": "ECHO_DONE — I created `ECHO.md`." },
+    { "text": "RESUMED — I remember creating ECHO.md in this conversation.", "expectHistory": "ECHO_DONE" }
   ]
 }

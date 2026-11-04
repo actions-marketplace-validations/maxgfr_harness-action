@@ -1,6 +1,11 @@
 name: harness
 
-# Dogfooding: mention @harness in an issue, a pull request or a review comment of this repository.
+# Talk to the agent like you talk to a local coding agent:
+#   - mention @harness in an issue, a pull request or a review comment; mention it again later in
+#     the same thread and it continues the same session (it remembers);
+#   - or give it a task from the Actions tab / the CLI, and get a pull request:
+#       gh workflow run harness.yml -f prompt="Add a --json flag to the CLI"
+#     then keep talking to it on that pull request.
 on:
   issue_comment:
     types: [created]
@@ -10,12 +15,29 @@ on:
     types: [submitted]
   issues:
     types: [opened, assigned, labeled]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'What should the agent do?'
+        required: true
+      harness:
+        description: 'opencode | codex | pi | claw'
+        required: false
+        default: ''
+      model:
+        description: 'provider/model (empty = the repository default)'
+        required: false
+        default: ''
 
 jobs:
   harness:
-    if: contains(github.event.comment.body || github.event.review.body || github.event.issue.body || '', '@harness') || github.event.action == 'labeled' || github.event.action == 'assigned'
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.comment.body || github.event.review.body || github.event.issue.body || '', '@harness') || github.event.action == 'labeled' || github.event.action == 'assigned'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # one agent per conversation at a time
+    concurrency:
+      group: harness-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
@@ -27,9 +49,15 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
-          harness: ${{ vars.HARNESS || 'opencode' }}
-          model: ${{ vars.HARNESS_MODEL || 'anthropic/claude-sonnet-5-5' }}
+          harness: ${{ inputs.harness || vars.HARNESS || 'opencode' }}
+          model: ${{ inputs.model || vars.HARNESS_MODEL || 'anthropic/claude-sonnet-5-5' }}
+          prompt: ${{ inputs.prompt }}
+          open_pr: ${{ github.event_name == 'workflow_dispatch' }}
+          tools: ${{ github.event_name == 'workflow_dispatch' && 'edit' || 'auto' }}
+          loop_until: npm test
+          max_iterations: '4'
           allow_bash: |
             npm test*
             npm run *

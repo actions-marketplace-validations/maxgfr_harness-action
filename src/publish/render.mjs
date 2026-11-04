@@ -60,9 +60,12 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
   if (errorText) L.push('', `> ${truncate(errorText, 1500).replace(/\n/g, '\n> ')}`);
   if (progress) L.push('', '<details><summary>Progress</summary>', '', progress, '', '</details>');
   if (branch) {
-    L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : ''}`);
+    const pr = branch.pullUrl ? ` · [**Pull request #${branch.pullNumber} ➔**](${branch.pullUrl})` : branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : '';
+    L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${pr}`);
   }
   if (review) L.push('', `💬 Posted a review with ${review} inline comment${review === 1 ? '' : 's'}.`);
+  const loopText = loopLine(run);
+  if (loopText) L.push('', loopText);
   L.push('', '---', '');
   L.push(finalText?.trim() ? finalText.trim() : '_The agent did not produce a final message._');
   if (findings.length) L.push('', `<details><summary>${findings.length} finding${findings.length === 1 ? '' : 's'}</summary>`, '', findingsTable(findings, { blobUrl }), '', '</details>');
@@ -73,6 +76,19 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
   }
   L.push('', footer({ harness, model, run, runUrl }));
   return truncate(L.join('\n'), 64000);
+}
+
+/** "🔁 3 iterations · `npm test` passed" / "↺ continued the conversation". */
+export function loopLine(run) {
+  if (!run) return '';
+  const bits = [];
+  if (run.resumed) bits.push('↺ continued the conversation');
+  const n = run.iterations?.length ?? 0;
+  if (run.loopResult && run.loopResult !== 'single') {
+    const outcome = { passed: `\`${run.loopUntil}\` passed`, complete: 'task_complete called', exhausted: run.loopUntil ? `\`${run.loopUntil}\` still failing` : 'not declared complete', stopped: 'stopped' }[run.loopResult] ?? run.loopResult;
+    bits.push(`🔁 ${n} iteration${n === 1 ? '' : 's'} · ${outcome}`);
+  }
+  return bits.join(' · ');
 }
 
 export function summaryMarkdown({ harness, version, model, mode, status, run, finalText, findings, branch, structured, transcript, errorText, blobUrl }) {
@@ -90,7 +106,9 @@ export function summaryMarkdown({ harness, version, model, mode, status, run, fi
     L.push(`| Tokens | ${run.inputTokens} in / ${run.outputTokens} out |`);
     L.push(`| Cost | ${run.costKnown ? `$${run.cost.toFixed(4)}` : 'not reported by this harness'} |`);
   }
+  if (run?.iterations?.length > 1 || run?.resumed) L.push(`| Loop / session | ${loopLine(run)} |`);
   if (branch) L.push(`| Branch | [\`${branch.name}\`](${branch.url}) |`);
+  if (branch?.pullUrl) L.push(`| Pull request | [#${branch.pullNumber}](${branch.pullUrl}) |`);
   L.push('');
   if (errorText) L.push(`> [!WARNING]\n> ${truncate(errorText, 2000).replace(/\n/g, '\n> ')}`, '');
   if (finalText) L.push('### Result', '', finalText.trim(), '');

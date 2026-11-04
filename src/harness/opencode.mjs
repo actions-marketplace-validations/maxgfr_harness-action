@@ -1,7 +1,11 @@
-// OpenCode adapter — `opencode run --format json`.
+// OpenCode 1 adapter (opencode-ai 1.x) — `opencode run --format json`.
 // Config is injected with OPENCODE_CONFIG_CONTENT (merged on top of the repository's own).
+// Selected with `harness: opencode` + `harness_version: 1` (or any 1.x version).
+import fs from 'node:fs';
+import path from 'node:path';
 import { npmInstall } from './install.mjs';
 import { deepMerge, isPlainObject } from '../util.mjs';
+import { capture } from './exec.mjs';
 
 function bashPermission(perms) {
   if (perms.bash === 'all') return 'allow';
@@ -58,8 +62,27 @@ export default {
     };
   },
 
-  command({ prepared, prompt, extraArgs }) {
-    return { args: ['run', '--format', 'json', '-m', prepared.modelArg, ...extraArgs, prompt], stdin: null };
+  command({ prepared, prompt, extraArgs, sessionId }) {
+    return { args: ['run', '--format', 'json', '-m', prepared.modelArg, ...(sessionId ? ['-s', sessionId] : []), ...extraArgs, prompt], stdin: null };
+  },
+
+  resumable: true,
+
+  async importSession({ bin, env, cwd, dir }) {
+    const file = path.join(dir, 'opencode-session.json');
+    const meta = path.join(dir, 'meta.json');
+    if (!fs.existsSync(file) || !fs.existsSync(meta)) return null;
+    const { sessionId } = JSON.parse(fs.readFileSync(meta, 'utf8'));
+    const r = await capture(bin, ['import', file], { env, cwd });
+    return r.code === 0 ? sessionId : null;
+  },
+
+  async exportSession({ bin, env, cwd, dir, sessionId }) {
+    const r = await capture(bin, ['export', sessionId], { env, cwd });
+    const start = r.stdout.indexOf('{');
+    if (r.code !== 0 || start < 0) return false;
+    fs.writeFileSync(path.join(dir, 'opencode-session.json'), r.stdout.slice(start));
+    return true;
   },
 
   parse(obj) {

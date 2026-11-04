@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        harness: [opencode, codex, pi, claw]
+        harness: [opencode, opencode-v1, codex, pi, claw]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -92,3 +92,67 @@ jobs:
           test "$CONCLUSION" = success
           test "$FINDINGS" = 1
           echo "$STRUCTURED" | grep -q '"verdict":"pass"'
+
+  # Loop mode, then a second run that must resume the conversation through the REAL Actions cache.
+  action-conversation:
+    needs: unit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [opencode, codex, pi]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Start the mock LLM
+        run: |
+          nohup node test/mock-llm/server.mjs --port 4010 --script test/e2e/conversation-script.json > "$RUNNER_TEMP/mock.log" 2>&1 &
+          sleep 1
+      - name: Turn 1 — loop until DONE.md exists
+        id: first
+        uses: ./
+        env:
+          MOCK_API_KEY: mock
+        with:
+          harness: ${{ matrix.harness }}
+          model: mock/mock-model
+          base_url: http://127.0.0.1:4010/v1
+          api_key_env: MOCK_API_KEY
+          prompt: Create DONE.md.
+          tools: full
+          loop_until: test -f DONE.md
+          max_iterations: '3'
+          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          on_agent_error: fail
+          timeout_minutes: '5'
+      - name: Turn 2 — same conversation, restored from the cache
+        id: second
+        uses: ./
+        env:
+          MOCK_API_KEY: mock
+        with:
+          harness: ${{ matrix.harness }}
+          model: mock/mock-model
+          base_url: http://127.0.0.1:4010/v1
+          api_key_env: MOCK_API_KEY
+          prompt: Do you remember what you did?
+          tools: read-only
+          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          on_agent_error: fail
+          timeout_minutes: '5'
+      - name: Check
+        env:
+          ITERATIONS: ${{ steps.first.outputs.iterations }}
+          FIRST: ${{ steps.first.outputs.conclusion }}
+          SECOND: ${{ steps.second.outputs.conclusion }}
+          RESUMED: ${{ steps.second.outputs.resumed }}
+        run: |
+          echo "iterations=$ITERATIONS first=$FIRST second=$SECOND resumed=$RESUMED"
+          test "$ITERATIONS" = 2
+          test "$FIRST" = success
+          test "$SECOND" = success
+          test "$RESUMED" = true

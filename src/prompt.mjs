@@ -57,6 +57,9 @@ export function buildPrompt(p) {
   }
   if (ciStatus) L.push(`- ${tool('get_ci_status')} — the CI checks of the head commit.`);
   if (schema) L.push(`- ${tool('submit_structured_output')} — REQUIRED: call it exactly once at the end with the result, following its schema.`);
+  if (p.loop?.maxIterations > 1 && !p.loop.until) L.push(`- ${tool('task_complete')} — call it once the task is completely done and verified; until then you will be asked to continue.`);
+  const loopLine = loopInstructions(p.loop);
+  if (loopLine) { L.push(''); L.push('## Done means verified'); L.push(loopLine); }
 
   if (skills.length) {
     L.push('');
@@ -100,7 +103,31 @@ export function buildPrompt(p) {
   } else {
     L.push(request);
     L.push('');
-    L.push('Your final message is the report of this run (shown in the job summary): make it a concise Markdown summary.');
+    L.push(p.openPr
+      ? 'Your final message becomes the description of the pull request opened with your changes: say what you changed and why.'
+      : 'Your final message is the report of this run (shown in the job summary): make it a concise Markdown summary.');
   }
+  return L.join('\n');
+}
+
+function loopInstructions(loop) {
+  if (!loop || loop.maxIterations <= 1) return '';
+  if (loop.until) return `When you finish a turn, the action runs \`${loop.until}\`. If it fails, you get its output and continue in this same session (up to ${loop.maxIterations} turns). Run it yourself before you stop when you can.`;
+  return `You have up to ${loop.maxIterations} turns in this session. Work until the task is completely done, then call task_complete.`;
+}
+
+/** The prompt of a RESUMED session: it already has the setup, it only gets the new message. */
+export function buildFollowupPrompt(p) {
+  const { mode, ctx, request, extraInstructions, isPR, triggerComment } = p;
+  const L = [];
+  L.push(`New message in this conversation (event \`${ctx.eventName}${ctx.action ? `.${ctx.action}` : ''}\`, from @${ctx.actor}). The setup, tools and rules of the first message still apply; the repository may have changed since — re-read what you need.`);
+  if (triggerComment?.path) L.push('', `It was written on \`${triggerComment.path}\`${triggerComment.line ? ` line ${triggerComment.line}` : ''}:\n\n\`\`\`diff\n${triggerComment.diffHunk ?? ''}\n\`\`\``);
+  L.push('', '<request>', request, '</request>');
+  if (extraInstructions) L.push('', extraInstructions);
+  const loopLine = loopInstructions(p.loop);
+  if (loopLine) L.push('', loopLine);
+  L.push('', mode === 'tag'
+    ? `Your final message is posted as the reply on the ${isPR ? 'pull request' : 'issue'}.`
+    : 'Your final message is the report of this run.');
   return L.join('\n');
 }

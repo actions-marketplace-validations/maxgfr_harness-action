@@ -13,13 +13,35 @@ inputs:
     required: false
     default: ''
   harness:
-    description: 'Which harness drives the run: `opencode` (default), `codex`, `pi` or `claw` (experimental, built from source).'
+    description: 'Which harness drives the run: `opencode` (default, OpenCode 2), `codex`, `pi` or `claw` (experimental, built from source).'
     required: false
     default: 'opencode'
   harness_version:
-    description: 'Harness version (npm version; a commit SHA or a binary path for claw). Empty = the version pinned and tested by this release.'
+    description: 'Harness version (npm version; a commit SHA or a binary path for claw). Empty = the version pinned and tested by this release. For OpenCode, `1` (or any 1.x version) selects OpenCode 1 (`opencode-ai`) instead of OpenCode 2 (`@opencode/cli`).'
     required: false
     default: ''
+
+  # ── conversation and loop ─────────────────────────────────────────────────────────────────
+  session:
+    description: 'Conversation memory. `auto` (default): every mention on the same issue / PR resumes the same harness session, saved between runs with the Actions cache. `on`: also automation runs on an issue / PR. `off`: every run starts fresh.'
+    required: false
+    default: 'auto'
+  session_key:
+    description: 'Explicit conversation id (letters, digits, `.`, `-`, `_`), e.g. from a workflow_dispatch input, to continue a conversation outside an issue / PR.'
+    required: false
+    default: ''
+  max_iterations:
+    description: 'Loop mode: how many turns the agent gets in the same session. After each turn, `loop_until` is run (or, without it, the agent must call `task_complete`); until then it is re-prompted with the result. Default 1 (no loop), 5 when `loop_until` is set.'
+    required: false
+    default: ''
+  loop_until:
+    description: 'Loop mode: shell command that must succeed for the task to be done (e.g. `npm test`). Its output is fed back to the agent when it fails. The job fails (per `on_agent_error`) if it still fails after `max_iterations`.'
+    required: false
+    default: ''
+  open_pr:
+    description: 'Open a pull request with the changes (the agent''s reply becomes its description) instead of only a Create-PR link. Implies a new branch in automation mode, e.g. a workflow_dispatch prompt. Mentioning the trigger phrase on that PR continues the same conversation.'
+    required: false
+    default: 'false'
   model:
     description: 'Model as `provider/model`, e.g. `anthropic/claude-sonnet-5-5`, `openai/gpt-5.1`, `openrouter/qwen/qwen3-coder`. Provider API keys are read from the environment (`env:` on the step).'
     required: true
@@ -226,6 +248,18 @@ outputs:
   findings_count:
     description: 'Number of findings reported by the agent.'
     value: ${{ steps.publish.outputs.findings_count }}
+  pr_number:
+    description: 'Number of the pull request opened with `open_pr`.'
+    value: ${{ steps.publish.outputs.pr_number }}
+  pr_url:
+    description: 'URL of the pull request opened with `open_pr`.'
+    value: ${{ steps.publish.outputs.pr_url }}
+  iterations:
+    description: 'Number of agent turns in this run (loop mode).'
+    value: ${{ steps.publish.outputs.iterations }}
+  resumed:
+    description: '`true` when this run continued a saved conversation.'
+    value: ${{ steps.publish.outputs.resumed }}
 
 runs:
   using: composite
@@ -260,6 +294,16 @@ runs:
         HARNESS_TOOLS_DIR: ${{ steps.resolve.outputs.tools_dir }}
       run: node "$GITHUB_ACTION_PATH/src/cli.mjs" prepare
 
+    # The conversation of this issue / PR (latest save wins).
+    - name: Restore the conversation
+      if: steps.prepare.outputs.run == 'true' && steps.prepare.outputs.session_restore_prefix != ''
+      continue-on-error: true
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.prepare.outputs.session_dir }}
+        key: ${{ steps.prepare.outputs.session_restore_prefix }}none
+        restore-keys: ${{ steps.prepare.outputs.session_restore_prefix }}
+
     # NO token here: the agent runs from the token-free plan written by Prepare.
     - name: Run the agent
       id: run
@@ -278,6 +322,14 @@ runs:
         HARNESS_INPUTS: ${{ toJSON(inputs) }}
         HARNESS_STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
       run: node "$GITHUB_ACTION_PATH/src/cli.mjs" publish
+
+    - name: Save the conversation
+      if: always() && steps.publish.outputs.session_save_key != ''
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.publish.outputs.session_dir }}
+        key: ${{ steps.publish.outputs.session_save_key }}
 
     - name: Upload SARIF
       if: always() && inputs.sarif == 'true' && steps.publish.outputs.sarif_file != ''

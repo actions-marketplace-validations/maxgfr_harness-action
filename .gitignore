@@ -3,3 +3,4 @@ node_modules/
 .impeccable/
 *.log
 .DS_Store
+.claude/worktrees/
