@@ -44,9 +44,12 @@ test('mode detection', () => {
 
 test('tag mode intent: questions are answered, action verbs act', () => {
   const p = '@harness';
-  for (const q of ['@harness why is the build slow?', '@harness what do you recommend for caching?', '@harness pourquoi ce test échoue ?', '@harness how would you fix the login bug?', '@harness est-ce que ce code est sûr ?', '@harness review this approach']) assert.equal(classifyIntent(q, p), 'ask', q);
-  for (const d of ['@harness fix the flaky test', '@harness please add a --json flag', '@harness can you implement retries?', '@harness corrige le bug de login', '@harness peux-tu ajouter des tests', '@harness run the echo check', 'Create DONE.md @harness create DONE.md']) assert.equal(classifyIntent(d, p), 'do', d);
+  for (const q of ['@harness why is the build slow?', '@harness what do you recommend for caching?', '@harness pourquoi ce test échoue ?', '@harness how would you fix the login bug?', '@harness est-ce que ce code est sûr ?', '@harness review this approach', '@harness explain the retry logic', '@harness do you think this is safe?', '@harness do not change anything, just explain', '@harness does this handle errors?', '@harness in src/a.mjs, why is it slow?', '@harness review and fix nothing', '@harness comment out this line']) assert.equal(classifyIntent(q, p), 'ask', q);
+  for (const d of ['@harness fix the flaky test', '@harness please add a --json flag', '@harness can you implement retries?', '@harness corrige le bug de login', '@harness peux-tu ajouter des tests', '@harness run the echo check', 'Create DONE.md @harness create DONE.md', '@harness in src/a.mjs, add a flag', '@harness on line 12: remove the log', '@harness dans src/a.mjs, ajoute un test']) assert.equal(classifyIntent(d, p), 'do', d);
   assert.equal(classifyIntent('@harness do whatever you recommend', p), 'do');
+  assert.equal(classifyIntent('@harness do it', p), 'do');
+  assert.equal(classifyIntent('@harness do: the fix', p), 'do');
+  assert.equal(classifyIntent('@harness do comment out this line', p), 'do');
   assert.equal(classifyIntent('@harness ask: fix or rewrite?', p), 'ask');
 });
 

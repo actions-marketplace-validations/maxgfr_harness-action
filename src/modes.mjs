@@ -79,7 +79,18 @@ const DO_VERBS = [
   'mets', 'mettre', 'remplace', 'remplacer', 'déplace', 'deplace', 'refactorise', 'refactoriser', 'améliore', 'ameliore', 'nettoie',
   'génère', 'genere', 'traduis', 'documente', 'migre', 'répare', 'repare',
 ];
+// Words that open a question or an analysis request. They win over DO_VERBS.
+const ASK_LEADS = [
+  'why', 'what', 'how', 'which', 'where', 'when', 'who', 'whether', 'is', 'are', 'does', 'should',
+  'explain', 'review', 'compare', 'assess', 'audit', 'summarize', 'summarise', 'describe', 'analyze', 'analyse',
+  'pourquoi', 'quoi', 'comment', 'quel', 'quelle', 'quels', 'quelles', 'qu', 'est-ce', 'est', 'explique', 'expliquer',
+  'résume', 'resume', 'audite', 'décris', 'decris',
+];
 const LEAD = /^(?:(?:hey|hi|ok|okay|please|pls|stp|svp|merci de|peux[- ]tu|tu peux|pourrais[- ]tu|can you|could you|would you|go ahead and|now|maintenant|alors|and|et|also|aussi)[\s,:!-]+)*/i;
+// A scoping preamble such as "in src/a.mjs, " or "on line 12: " that hides the real verb.
+const SCOPE = /^(?:in|on|at|for|dans|sur|pour|en)\s+[^,:\n]{1,80}[,:]\s*/i;
+// `ask` / `do` as an explicit switch; "do you think", "do not change" and "does" are ordinary sentences.
+const FORCED = /^(ask|do)(?![\p{L}\p{N}_'’-])(?!\s+(?:you|we|i|they|not|n't)\b)[\s:,-]*/iu;
 
 /**
  * Tag mode: is this a question (answer it, read-only, with recommendations) or a request to
@@ -89,10 +100,11 @@ const LEAD = /^(?:(?:hey|hi|ok|okay|please|pls|stp|svp|merci de|peux[- ]tu|tu pe
 export function classifyIntent(text, phrase) {
   const idx = text.toLowerCase().indexOf(phrase.toLowerCase());
   let req = (idx >= 0 ? text.slice(idx + phrase.length) : text).trim();
-  const forced = /^(ask|do)\b[\s:,-]*/i.exec(req);
+  const forced = FORCED.exec(req);
   if (forced) return forced[1].toLowerCase();
-  req = req.replace(LEAD, '');
+  req = req.replace(LEAD, '').replace(SCOPE, '').replace(LEAD, '');
   const first = (/^[\p{L}-]+/u.exec(req)?.[0] ?? '').toLowerCase();
+  if (ASK_LEADS.includes(first)) return 'ask';
   return DO_VERBS.includes(first) ? 'do' : 'ask';
 }
 
