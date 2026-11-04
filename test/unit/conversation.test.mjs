@@ -109,6 +109,10 @@ test('follow-up prompt of a resumed session is short and carries the new request
   assert.ok(f.length < buildPrompt({ ...p, skills: [] }).length);
   assert.match(buildPrompt({ ...p, loop: { maxIterations: 4, until: 'npm test' } }), /runs `npm test`/);
   assert.match(buildPrompt({ ...p, loop: { maxIterations: 4, until: '' } }), /task_complete/);
+  // allow-listed shell: both prompts warn that each part of a pipe / chain is checked
+  const allow = { ...p, perms: { level: 'edit', bash: 'allowlist', edit: true }, allowBash: ['npm test*'] };
+  assert.match(buildPrompt(allow), /`npm test\*`[\s\S]*no pipes/i);
+  assert.match(buildFollowupPrompt(allow), /`npm test\*` — run them as they are, without pipes/);
 });
 
 test('loop and session lines in the reply', () => {

@@ -38,7 +38,10 @@ export function buildPrompt(p) {
   L.push('## Environment');
   L.push(`- Working directory: the repository checkout${pr ? ` (pull request #${pr.number}, branch \`${pr.headRef}\`)` : ''}.`);
   L.push(`- Permission level: ${PERMS_TEXT[perms.level]}`);
-  if (perms.bash === 'allowlist') L.push(`- Allowed shell commands (glob patterns): ${allowBash.map((c) => `\`${c}\``).join(', ')}`);
+  if (perms.bash === 'allowlist') {
+    L.push(`- Allowed shell commands (glob patterns): ${allowBash.map((c) => `\`${c}\``).join(', ')}`);
+    L.push('  Run them as they are: every part of a pipe, `&&` / `;` chain or subshell is checked on its own, so `npm test | tail` is denied when `tail` is not allowed. No pipes, chains or redirections around allowed commands; their full output comes back to you anyway.');
+  }
   if (perms.edit) {
     L.push(
       commitMode === 'none'
@@ -139,6 +142,7 @@ export function buildFollowupPrompt(p) {
   if (triggerComment?.path) L.push('', `It was written on \`${triggerComment.path}\`${triggerComment.line ? ` line ${triggerComment.line}` : ''}:\n\n\`\`\`diff\n${triggerComment.diffHunk ?? ''}\n\`\`\``);
   // Permissions are decided per message: restate them, they may differ from the last turn.
   if (p.perms) L.push('', `Permission level for THIS message: ${PERMS_TEXT[p.perms.level]}`);
+  if (p.perms?.bash === 'allowlist') L.push(`Allowed shell commands: ${(p.allowBash ?? []).map((c) => `\`${c}\``).join(', ')} — run them as they are, without pipes, chains or redirections (each part is checked on its own).`);
   if (p.perms?.edit && p.targetBranch) L.push(`You are on \`${p.targetBranch}\`, the branch of this conversation: your earlier changes are there.`);
   L.push('', '<request>', request, '</request>');
   if (extraInstructions) L.push('', extraInstructions);
