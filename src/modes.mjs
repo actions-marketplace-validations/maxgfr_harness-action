@@ -95,6 +95,28 @@ const FORCED = /^(ask|do)(?![\p{L}\p{N}_'’-])(?!\s+(?:you|we|i|they|not|n't)\b
 /**
  * Tag mode: is this a question (answer it, read-only, with recommendations) or a request to
  * change code? `ask` / `do` right after the trigger phrase force it.
+ *
+ * Heuristic, in order:
+ *  1. Keep only the text after the FIRST occurrence of `phrase` (case-insensitive). Anything
+ *     before it is ignored; if `phrase` is absent, the whole text is used.
+ *  2. A leading `ask` / `do` forces the result (`@harness do: the fix`, `@harness ask fix or rewrite?`).
+ *     Ordinary sentences such as "do you think…", "do not change…" or "does this…" do not count.
+ *  3. Strip politeness / filler (`LEAD`: "please", "can you", "peux-tu"…), then a scoping preamble
+ *     (`SCOPE`: "in src/a.mjs, ", "on line 12: "), then filler again, so the real verb is exposed.
+ *  4. Take the first word (letters and hyphens only, so "qu'est-ce" yields "qu"). A word in
+ *     `ASK_LEADS` (question / analysis words) gives `'ask'`; a word in `DO_VERBS` gives `'do'`.
+ *  5. Anything else, including an empty request, gives `'ask'`. This is deliberate: when the
+ *     intent is unclear, answering read-only is safer than editing code.
+ *
+ * Only the first word is looked at, in English and French. To support another verb or language,
+ * extend `DO_VERBS` / `ASK_LEADS`; `test/unit/core.test.mjs` ("tag mode intent") lists the expected cases.
+ *
+ * In `prepare` this is only called for `tag` mode, and not at all when the `ask_mode` input is
+ * `off` (always `'do'`) or `always` (always `'ask'`). `'ask'` makes the run read-only with a single
+ * iteration. For `issues` and `pull_request` events, `text` is the title followed by the body.
+ *
+ * @param {string} text The text that triggered the run (comment body, or title + body).
+ * @param {string} phrase The trigger phrase, e.g. `@harness`.
  * @returns {'ask'|'do'}
  */
 export function classifyIntent(text, phrase) {

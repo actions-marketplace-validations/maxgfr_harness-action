@@ -51,6 +51,9 @@ test('tag mode intent: questions are answered, action verbs act', () => {
   assert.equal(classifyIntent('@harness do: the fix', p), 'do');
   assert.equal(classifyIntent('@harness do comment out this line', p), 'do');
   assert.equal(classifyIntent('@harness ask: fix or rewrite?', p), 'ask');
+  // first word in neither list: unclear intent falls back to answering read-only
+  assert.equal(classifyIntent('@harness tests are flaky', p), 'ask');
+  assert.equal(classifyIntent('@harness', p), 'ask');
 });
 
 test('inputs: validation and defaults', () => {
