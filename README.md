@@ -159,6 +159,8 @@ gh workflow run agent.yml -f prompt="Add rate limiting to the /login route"
 
 The pull request carries the conversation: mention `@harness` on it (with the tag-mode workflow above) and the same session continues. This repository dogfoods all of it in [`.github/workflows/harness.yml`](.github/workflows/harness.yml).
 
+> With the job token (`github.token`), GitHub only lets a workflow open pull requests if the repository allows it: **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"**, or `gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow -F can_approve_pull_request_reviews=true -f default_workflow_permissions=read`. A GitHub App token as `github_token` doesn't need it. Without either, the changes still land on the branch and the summary links to *Create PR*.
+
 ## Harnesses
 
 | | OpenCode | Codex | Pi | claw-code |

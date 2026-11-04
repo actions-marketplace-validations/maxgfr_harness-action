@@ -47,7 +47,7 @@ inputs:
     required: false
     default: ''
   open_pr:
-    description: 'Open a pull request with the changes (the agent''s reply becomes its description) instead of only a Create-PR link. Implies a new branch in automation mode, e.g. a workflow_dispatch prompt. Mentioning the trigger phrase on that PR continues the same conversation.'
+    description: 'Open a pull request with the changes (the agent''s reply becomes its description) instead of only a Create-PR link. Implies a new branch in automation mode, e.g. a workflow_dispatch prompt. Mentioning the trigger phrase on that PR continues the same conversation. With the job token, the repository must allow it (Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"); a GitHub App token works without it.'
     required: false
     default: 'false'
   model:

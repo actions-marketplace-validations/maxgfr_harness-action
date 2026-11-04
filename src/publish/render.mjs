@@ -109,6 +109,7 @@ export function summaryMarkdown({ harness, version, model, mode, status, run, fi
   if (run?.iterations?.length > 1 || run?.resumed) L.push(`| Loop / session | ${loopLine(run)} |`);
   if (branch) L.push(`| Branch | [\`${branch.name}\`](${branch.url}) |`);
   if (branch?.pullUrl) L.push(`| Pull request | [#${branch.pullNumber}](${branch.pullUrl}) |`);
+  else if (branch?.prUrl) L.push(`| Pull request | [Create PR ➔](${branch.prUrl}) |`);
   L.push('');
   if (errorText) L.push(`> [!WARNING]\n> ${truncate(errorText, 2000).replace(/\n/g, '\n> ')}`, '');
   if (finalText) L.push('### Result', '', finalText.trim(), '');

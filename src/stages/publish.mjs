@@ -155,7 +155,10 @@ export async function publish({ env = process.env, stateDir }) {
       branch.pullUrl = pull.url;
       branch.pullNumber = pull.number;
     } catch (err) {
-      core.warning(`Could not open the pull request: ${err.message}`);
+      const hint = /not permitted to create/i.test(err.message)
+        ? ' Enable Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests", or pass a GitHub App token as github_token. The changes are on the branch; use the Create-PR link.'
+        : '';
+      core.warning(`Could not open the pull request: ${err.message}.${hint}`);
     }
   }
 
