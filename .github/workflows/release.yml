@@ -1,0 +1,64 @@
+name: Release
+
+# Every push to main that passes CI is released, like the other maxgfr actions: a semver tag from
+# the conventional commits since the last release (feat → minor, fix/other → patch, BREAKING
+# CHANGE → major), a GitHub release (the Marketplace lists the latest one), and the floating tags
+# `v<major>`, `v<major>.<minor>` and `marketplace` moved to it — so the latest version is the one
+# you get everywhere: the Marketplace page, `@v2`, `@marketplace`. The published tag is then
+# checked like a user would consume it.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Tag the version
+        id: tag
+        uses: mathieudutour/github-tag-action@v7
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          commit_sha: ${{ github.event.workflow_run.head_sha }}
+          rolling_tags: true
+
+      - name: Create the release (listed on the Marketplace as the latest)
+        if: steps.tag.outputs.new_tag != ''
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag.outputs.new_tag }}
+          name: ${{ steps.tag.outputs.new_tag }}
+          body: ${{ steps.tag.outputs.changelog }}
+          makeLatest: true
+
+      - name: Move the marketplace tag to the latest release
+        if: steps.tag.outputs.new_tag != ''
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git tag -f marketplace "$SHA"
+          git push -f origin refs/tags/marketplace
+
+  check:
+    needs: release
+    if: needs.release.outputs.tag != ''
+    uses: ./.github/workflows/release-check.yml
+    with:
+      ref: ${{ needs.release.outputs.tag }}

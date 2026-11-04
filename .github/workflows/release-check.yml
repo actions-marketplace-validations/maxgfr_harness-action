@@ -4,6 +4,13 @@ name: Release check
 on:
   release:
     types: [published]
+  # called by release.yml: a release created with the job token triggers no other workflow
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Tag of maxgfr/harness-action to check'
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       ref:

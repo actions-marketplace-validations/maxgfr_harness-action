@@ -266,6 +266,10 @@ CI runs both on every push, plus `action.yml` itself (`uses: ./`): a smoke test,
 
 The e2e suite needs no API key. `test/mock-llm` speaks the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages APIs and replays a script, whatever harness is on the other end. `test/mock-github` records the comments, reviews, refs and GraphQL commits.
 
+### Releases
+
+Automatic: every push to `main` that passes CI is tagged from its conventional commits (`feat:` → minor, `fix:` and others → patch, `BREAKING CHANGE` → major), released, and listed on the Marketplace as the latest version. The floating tags `v2`, `v2.<minor>` and `marketplace` move with it, then `release-check.yml` runs the published tag as a user would. So `@v2` always gets the latest v2.
+
 ## License
 
 MIT
