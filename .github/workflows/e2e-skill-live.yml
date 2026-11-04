@@ -1,0 +1,81 @@
+name: E2E (complex skill, live)
+
+# A real research skill — maxgfr/ultrasearch: the agent runs its own web searches, the skill's
+# engine fetches and cleans every page into a dossier, the agent writes a report citing each
+# claim [S#] — through harness-action, with a real model. The job fails unless the skill's own
+# `check` (no dangling or unsourced citation) passes on that report. Manual: it costs tokens.
+on:
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: 'opencode | pi | openclaw | codex (codex needs OPENAI_API_KEY)'
+        required: false
+        default: 'opencode'
+      model:
+        description: 'provider/model'
+        required: false
+        default: 'anthropic/claude-sonnet-5-5'
+      question:
+        description: 'What to research'
+        required: false
+        default: 'How does the GitHub Actions cache restrict low-trust triggers since 2026, and what are the recommended workarounds?'
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: harness-action · ultrasearch
+        id: harness
+        uses: ./
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          skills: maxgfr/ultrasearch
+          skill: ultrasearch
+          tools: full
+          prompt: |
+            Use ultrasearch to research this question, at standard depth:
+
+            "${{ inputs.question }}"
+
+            Follow the skill end to end: run your own web searches from several different angles and pool the hits, gather them into a run directory at "$HARNESS_OUT/research" (use exactly that --out), top up the gaps, write SUMMARY.md and REPORT.md citing every claim [S#], render, and run the skill's `check` on the run until it passes.
+            Your final message: the TL;DR with its citations, and the result of `check`.
+          budget_usd: '3'
+          max_steps: '400'
+          timeout_minutes: '35'
+          on_agent_error: fail
+
+      - name: Check the report with the skill's own gate
+        env:
+          REPORT_DIR: ${{ steps.harness.outputs.report_dir }}
+          CONCLUSION: ${{ steps.harness.outputs.conclusion }}
+          COST: ${{ steps.harness.outputs.cost_usd }}
+        run: |
+          state="$(dirname "$REPORT_DIR")"
+          run="$state/out/research"
+          engine="$state/home/.agents/skills/ultrasearch/scripts/ultrasearch.mjs"
+          echo "conclusion=$CONCLUSION cost=\$$COST run=$run"
+          test "$CONCLUSION" = success
+          for f in sources.json REPORT.md SUMMARY.md; do test -s "$run/$f" || { echo "::error::missing $f"; exit 1; }; done
+          echo "sources: $(jq 'if type == "array" then length else (.sources // []) | length end' "$run/sources.json")"
+          echo "citations in REPORT.md: $(grep -oE '\[S[0-9]+\]' "$run/REPORT.md" | sort -u | wc -l) distinct"
+          node "$engine" check --run "$run"
+          echo "----- SUMMARY.md -----"; cat "$run/SUMMARY.md"
+          mkdir -p research && cp -R "$run"/. research/
+
+      - name: Upload the research run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: research-${{ inputs.harness }}
+          path: research
+          if-no-files-found: ignore
