@@ -1,6 +1,6 @@
 {
   "name": "harness-action",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "Run an open-source coding-agent harness (OpenCode, Codex, Pi, claw-code) in GitHub Actions with any model and any Agent Skill.",
   "type": "module",
