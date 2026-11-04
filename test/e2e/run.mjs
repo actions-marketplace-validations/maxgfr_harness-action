@@ -2,8 +2,7 @@
 // Keyless end-to-end test: the real harness binaries, a scripted mock LLM and a mock GitHub API,
 // driven through the exact steps of action.yml (resolve → prepare → run → publish).
 //
-//   node test/e2e/run.mjs [--harness opencode,codex,pi,claw] [--scenario issue-tag,pr-automation]
-//   CLAW_BIN=/path/to/claw  uses a prebuilt claw instead of building it.
+//   node test/e2e/run.mjs [--harness opencode,codex,pi,openclaw] [--scenario issue-tag,pr-automation,conversation-loop]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,14 +14,12 @@ import { createGitHubMock } from '../mock-github/server.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = path.join(ROOT, 'src', 'cli.mjs');
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : d; };
-const HARNESSES = arg('harness', 'opencode,codex,pi,claw').split(',');
+const HARNESSES = arg('harness', 'opencode,codex,pi,openclaw').split(',');
 const SCENARIOS = arg('scenario', 'issue-tag,pr-automation,conversation-loop').split(',');
 const TOOLS_DIR = process.env.HARNESS_TOOLS_DIR || path.join(ROOT, '.harness', 'tools');
 
-/** `opencode-v1` = OpenCode 1 through `harness_version: 1`; CLAW_BIN = a prebuilt claw. */
 function harnessInputs(h) {
-  if (h === 'opencode-v1') return { harness: 'opencode', harness_version: '1' };
-  return { harness: h, harness_version: h === 'claw' && process.env.CLAW_BIN ? process.env.CLAW_BIN : '' };
+  return { harness: h };
 }
 
 const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
@@ -210,7 +207,6 @@ async function scenario(harness, name) {
 //           DONE.md, the check passes, PR #21 is opened, the session is saved under pr-21;
 //   run 2 — `@harness` on PR #21: the session is resumed (the mock refuses to answer unless the
 //           history it receives contains run 1's last message).
-// claw cannot resume a session: it runs the loop part only.
 // ---------------------------------------------------------------------------------------------
 const CONVERSATION_SCRIPT = [
   { text: 'FIRST_TURN — not done yet.' },
@@ -333,7 +329,7 @@ async function conversationLoop(harness) {
   return failed.length === 0;
 }
 
-const getAdapterResumable = (h) => h !== 'claw';
+const getAdapterResumable = () => true; // every supported harness resumes its sessions
 
 let ok = true;
 for (const h of HARNESSES) {

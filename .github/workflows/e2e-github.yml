@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       harness:
-        description: 'opencode | opencode-v1 | codex | pi | claw'
+        description: 'opencode | codex | pi | openclaw'
         required: false
         default: 'opencode'
       prompt:
@@ -40,9 +40,8 @@ jobs:
         env:
           BODY: ${{ github.event.comment.body || format('harness={0}', inputs.harness) }}
         run: |
-          h=$(printf '%s' "$BODY" | grep -oE 'harness=(opencode-v1|opencode|codex|pi|claw)' | head -1 | cut -d= -f2)
-          h=${h:-opencode}
-          if [ "$h" = opencode-v1 ]; then echo "harness=opencode" >> "$GITHUB_OUTPUT"; echo "version=1" >> "$GITHUB_OUTPUT"; else echo "harness=$h" >> "$GITHUB_OUTPUT"; echo "version=" >> "$GITHUB_OUTPUT"; fi
+          h=$(printf '%s' "$BODY" | grep -oE 'harness=(opencode|codex|pi|openclaw)' | head -1 | cut -d= -f2)
+          echo "harness=${h:-opencode}" >> "$GITHUB_OUTPUT"
           if printf '%s' "$BODY" | grep -q 'expect=resumed'; then echo "expect=resumed" >> "$GITHUB_OUTPUT"; else echo "expect=new" >> "$GITHUB_OUTPUT"; fi
       - name: Start the mock LLM
         env:
@@ -59,7 +58,6 @@ jobs:
           MOCK_API_KEY: mock
         with:
           harness: ${{ steps.pick.outputs.harness }}
-          harness_version: ${{ steps.pick.outputs.version }}
           model: mock/mock-model
           base_url: http://127.0.0.1:4010/v1
           api_key_env: MOCK_API_KEY

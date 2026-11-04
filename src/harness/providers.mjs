@@ -1,4 +1,4 @@
-// Known providers, for harnesses that need an explicit endpoint (Codex, claw) or a custom one.
+// Known providers, for harnesses that need an explicit endpoint (Codex) or a custom one.
 export const PROVIDERS = {
   openai: { baseUrl: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', protocol: 'openai' },
   anthropic: { baseUrl: 'https://api.anthropic.com', keyEnv: 'ANTHROPIC_API_KEY', protocol: 'anthropic' },

@@ -35,7 +35,7 @@ export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
 export function feedbackPrompt({ check, iteration, max, resumable, original, previousText }) {
   const L = [TURN_MARKER];
   if (!resumable) {
-    // claw cannot resume a session: restate the task and what happened.
+    // a harness that cannot resume a session: restate the task and what happened.
     L.push(original, '', '## Previous attempt', '', previousText?.trim() || '_(no final message)_', '');
   }
   if (check) {
@@ -113,7 +113,8 @@ export async function run({ stateDir, env = process.env }) {
         budgetUsd: plan.limits.budgetUsd ? Math.max(0.000001, plan.limits.budgetUsd - total.cost) : 0,
       };
       const completesBefore = readOutbox(stateDir).filter((e) => e.kind === 'complete').length;
-      const { args, stdin } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId: resumable ? sessionId : null });
+      const { args, stdin, sessionId: chosen } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId: resumable ? sessionId : null, timeoutMinutes: limits.timeoutMinutes });
+      if (chosen) sessionId = chosen; // harnesses where the action picks the session id (OpenClaw)
       if (loop.maxIterations > 1) core.info(`\n━━ iteration ${i}/${loop.maxIterations} ━━`);
       core.info(`▶ ${plan.harness} ${args.filter((a) => a !== prompt && a !== '-').join(' ').slice(0, 300)} …`);
       fs.appendFileSync(path.join(reportDir, 'execution.jsonl'), JSON.stringify({ t: 'iteration', n: i, resumed: Boolean(sessionId) }) + '\n');
@@ -163,9 +164,10 @@ export async function run({ stateDir, env = process.env }) {
       fs.mkdirSync(session.dir, { recursive: true });
       const ok = await adapter.exportSession({ ...helper, dir: session.dir, sessionId }).catch(() => false);
       if (ok) {
-        let turns = 0;
-        try { turns = JSON.parse(fs.readFileSync(path.join(session.dir, 'meta.json'), 'utf8')).turns ?? 0; } catch {}
-        fs.writeFileSync(path.join(session.dir, 'meta.json'), JSON.stringify({ harness: plan.adapterId ?? plan.harness, sessionId, turns: (resumed ? turns : 0) + 1, updatedAt: new Date().toISOString() }, null, 2));
+        let prev = {};
+        try { prev = JSON.parse(fs.readFileSync(path.join(session.dir, 'meta.json'), 'utf8')); } catch {}
+        // (`branch` belongs to the conversation, not to the harness session: it is kept)
+        fs.writeFileSync(path.join(session.dir, 'meta.json'), JSON.stringify({ ...(prev.branch ? { branch: prev.branch } : {}), harness: plan.adapterId ?? plan.harness, sessionId, turns: (resumed ? prev.turns ?? 0 : 0) + 1, updatedAt: new Date().toISOString() }, null, 2));
         core.info(`Conversation saved (session ${sessionId}).`);
       }
     }

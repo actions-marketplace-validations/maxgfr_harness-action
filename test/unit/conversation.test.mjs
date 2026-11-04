@@ -8,7 +8,7 @@ import { createGitHubMock } from '../mock-github/server.mjs';
 import { createClient } from '../../src/github/api.mjs';
 import { restoreSessionArtifact } from '../../src/github/session-store.mjs';
 import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
-import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode2.mjs';
+import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
 import { feedbackPrompt, TURN_MARKER, runCheck } from '../../src/stages/run.mjs';
@@ -19,14 +19,13 @@ import { stepIndex } from '../mock-llm/server.mjs';
 
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
 
-test('opencode resolves to OpenCode 2 unless a 1.x version is asked for', () => {
-  assert.equal(resolveHarness('opencode').adapterId, 'opencode');
+test('harnesses: opencode (OpenCode 2), codex, pi, openclaw', () => {
   assert.equal(resolveHarness('opencode').meta.package, '@opencode/cli');
-  assert.equal(resolveHarness('opencode', '1').adapterId, 'opencode-v1');
-  assert.equal(resolveHarness('opencode', '1').version, '1.19.5');
-  assert.equal(resolveHarness('opencode', '1.18.0').version, '1.18.0');
-  assert.equal(resolveHarness('opencode', '2.3.0').adapterId, 'opencode');
+  assert.equal(resolveHarness('opencode', '2.3.0').version, '2.3.0');
+  assert.throws(() => resolveHarness('opencode', '1.19.5'), /only OpenCode 2/);
   assert.equal(resolveHarness('pi').meta.package, '@earendil-works/pi-coding-agent');
+  assert.equal(resolveHarness('openclaw').meta.package, 'openclaw');
+  assert.throws(() => resolveHarness('claw'), /Unknown harness/);
   assert.throws(() => resolveHarness('opencode-v1'), /Unknown harness/);
 });
 

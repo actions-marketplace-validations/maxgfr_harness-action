@@ -21,7 +21,7 @@ on:
         description: 'What should the agent do?'
         required: true
       harness:
-        description: 'opencode | codex | pi | claw'
+        description: 'opencode | codex | pi | openclaw'
         required: false
         default: ''
       model:

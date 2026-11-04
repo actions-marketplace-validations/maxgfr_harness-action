@@ -1,5 +1,5 @@
 name: harness-action
-description: Run an open-source coding-agent harness (OpenCode, Codex, Pi, claw-code) in GitHub Actions — any model, any Agent Skill, @mentions, signed commits, reviews.
+description: Run an open-source coding-agent harness (OpenCode, Codex, Pi, OpenClaw) in GitHub Actions — any model, any Agent Skill, conversations, loops, signed commits, reviews.
 author: maxgfr
 
 branding:
@@ -13,13 +13,18 @@ inputs:
     required: false
     default: ''
   harness:
-    description: 'Which harness drives the run: `opencode` (default, OpenCode 2), `codex`, `pi` or `claw` (experimental, built from source).'
+    description: 'Which harness drives the run: `opencode` (default, OpenCode 2), `codex`, `pi` or `openclaw`.'
     required: false
     default: 'opencode'
   harness_version:
-    description: 'Harness version (npm version; a commit SHA or a binary path for claw). Empty = the version pinned and tested by this release. For OpenCode, `1` (or any 1.x version) selects OpenCode 1 (`opencode-ai`) instead of OpenCode 2 (`@opencode/cli`).'
+    description: 'Harness npm version. Empty = the version pinned and tested by this release.'
     required: false
     default: ''
+
+  ask_mode:
+    description: 'Tag mode: `auto` (default) — a question is answered read-only with recommendations, a request that starts with an action verb (fix, add, implement, corrige, ajoute…) changes code; `@harness ask …` / `@harness do …` force it. `always`: only answer. `off`: every mention may change code. An explicit `tools` input wins.'
+    required: false
+    default: 'auto'
 
   # ── conversation and loop ─────────────────────────────────────────────────────────────────
   session:
@@ -62,7 +67,7 @@ inputs:
     required: false
     default: ''
   skills:
-    description: 'Agent Skills to install, one per line: `owner/repo`, `owner/repo@ref`, `owner/repo#skill-name`, a git URL or a local path. Skills committed in the repository (.agents/.claude/.opencode/.claw/skills) are always available.'
+    description: 'Agent Skills to install, one per line: `owner/repo`, `owner/repo@ref`, `owner/repo#skill-name`, a git URL or a local path. Skills committed in the repository (.agents/.claude/.opencode/.codex/.pi/.openclaw skills) are always available.'
     required: false
     default: ''
   skill:
@@ -78,7 +83,7 @@ inputs:
     required: false
     default: 'auto'
   allow_bash:
-    description: 'Shell commands allowed at the `edit` level (glob patterns, one per line, e.g. `npm test*`). Enforced per pattern by OpenCode; Pi and claw can only enable bash as a whole; Codex runs commands inside its sandbox.'
+    description: 'Shell commands allowed at the `edit` level (glob patterns, one per line, e.g. `npm test*`). Enforced per pattern by OpenCode; Pi and OpenClaw can only enable the shell as a whole; Codex runs commands inside its sandbox.'
     required: false
     default: ''
   harness_args:
@@ -86,7 +91,7 @@ inputs:
     required: false
     default: ''
   harness_config:
-    description: 'Harness-native configuration merged on top of the generated one: JSON (inline or path) for OpenCode, claw and Pi (`{"settings.json": {…}}`), JSON or TOML for Codex.'
+    description: 'Harness-native configuration merged on top of the generated one: JSON (inline or path) for OpenCode, OpenClaw (`openclaw.json`) and Pi (`{"settings.json": {…}}`), JSON or TOML for Codex.'
     required: false
     default: ''
   mcp_config:
@@ -106,7 +111,7 @@ inputs:
     required: false
     default: '30'
   budget_usd:
-    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and claw report cost; Codex does not). Empty = no budget.'
+    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and OpenClaw report cost; Codex does not; OpenClaw is checked after each turn). Empty = no budget.'
     required: false
     default: ''
 

@@ -1,48 +1,134 @@
 name: E2E (live models)
 
-# Real providers, real cost: manual only. Configure the secrets you have; legs without a key fail.
+# Real providers, real cost: manual only. Per harness, with a real model:
+#   1. a skill run (read-only): the skill is loaded and its finding reported;
+#   2. loop mode: the agent must create LOOP.md so that `loop_until` passes;
+#   3. a second turn in the SAME session (restored from the artifact store) must remember 2.
+# Anthropic-compatible harnesses run on ANTHROPIC_API_KEY; codex needs OPENAI_API_KEY (or
+# OPENROUTER_API_KEY with an openrouter/… model) and is skipped without it.
 on:
   workflow_dispatch:
     inputs:
       harness:
-        description: 'Harness (empty = the default matrix)'
+        description: 'opencode | codex | pi | openclaw (empty = all)'
         required: false
         default: ''
       model:
-        description: 'Model, provider/model (with harness)'
+        description: 'provider/model (empty = the per-harness default)'
         required: false
         default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   live:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.harness != '' && format('[{{"harness":"{0}","model":"{1}"}}]', inputs.harness, inputs.model) || '[{"harness":"opencode","model":"anthropic/claude-haiku-5-5"},{"harness":"opencode","model":"openrouter/qwen/qwen3-coder"},{"harness":"codex","model":"openai/gpt-5.1-codex-mini"},{"harness":"pi","model":"openrouter/deepseek/deepseek-chat-v3.1"},{"harness":"claw","model":"anthropic/claude-haiku-5-5"}]') }}
+        include: ${{ fromJSON(inputs.harness != '' && format('[{{"harness":"{0}","model":"{1}"}}]', inputs.harness, inputs.model) || '[{"harness":"opencode","model":""},{"harness":"pi","model":""},{"harness":"openclaw","model":""},{"harness":"codex","model":""}]') }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - name: harness-action (${{ matrix.harness }} · ${{ matrix.model }})
-        id: harness
-        uses: ./
+      - name: Model
+        id: m
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          H: ${{ matrix.harness }}
+          M: ${{ matrix.model }}
+        run: |
+          if [ -n "$M" ]; then model="$M"
+          elif [ "$H" = codex ]; then
+            if [ -n "$OPENAI_API_KEY" ]; then model=openai/gpt-5.1-codex-mini
+            elif [ -n "$OPENROUTER_API_KEY" ]; then model=openrouter/openai/gpt-5.1-codex-mini
+            else model=; fi
+          else model=anthropic/claude-haiku-5-5; fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          if [ -z "$model" ]; then echo "::notice::$H skipped: no OPENAI_API_KEY / OPENROUTER_API_KEY secret"; fi
+
+      - name: 1 · skill run (read-only)
+        id: skill
+        if: steps.m.outputs.model != ''
+        uses: ./
         with:
           harness: ${{ matrix.harness }}
-          model: ${{ matrix.model }}
+          model: ${{ steps.m.outputs.model }}
           skills: ./test/fixtures/skills
           skill: echo-check
           tools: read-only
-          prompt: Run the echo check on this repository. Do not create files (you are read-only); just report the finding.
+          prompt: Run the echo check on this repository. You are read-only, so do not create files; report the finding.
           budget_usd: '0.50'
           timeout_minutes: '10'
           on_agent_error: fail
-      - name: Check
+
+      # The check asks, in its failure output only, for a random token it draws on its first run:
+      # the agent cannot guess it, so passing proves it read the check output and fixed its work.
+      - name: Completion check with a token only its output reveals
+        if: steps.m.outputs.model != ''
         run: |
-          test "${{ steps.harness.outputs.conclusion }}" = success
-          test "${{ steps.harness.outputs.findings_count }}" -ge 1
+          cat > "$RUNNER_TEMP/loop-check.sh" <<'EOF'
+          f="$RUNNER_TEMP/loop-token"
+          [ -f "$f" ] || openssl rand -hex 4 > "$f"
+          t="token-$(cat "$f")"
+          grep -qx 'harness-loop-ok' LOOP.md 2>/dev/null && grep -qx "$t" LOOP.md && exit 0
+          echo "FAILED: LOOP.md must contain the line harness-loop-ok AND the line $t"
+          exit 1
+          EOF
+
+      - name: 2 · loop until LOOP.md is right
+        id: loop
+        if: steps.m.outputs.model != ''
+        uses: ./
+        with:
+          harness: ${{ matrix.harness }}
+          model: ${{ steps.m.outputs.model }}
+          tools: full
+          prompt: Create a file named LOOP.md at the repository root containing the line harness-loop-ok, then stop. Do not run any check yourself.
+          loop_until: bash "$RUNNER_TEMP/loop-check.sh"
+          max_iterations: '3'
+          session_key: live-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+
+      - name: 3 · same conversation, next turn
+        id: resume
+        if: steps.m.outputs.model != ''
+        uses: ./
+        with:
+          harness: ${{ matrix.harness }}
+          model: ${{ steps.m.outputs.model }}
+          tools: read-only
+          prompt: Without reading any file, answer from memory of this conversation only — what is the exact name of the file you created in your previous turn? Answer with the file name only.
+          session_key: live-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+
+      - name: Check
+        if: steps.m.outputs.model != ''
+        env:
+          SKILL: ${{ steps.skill.outputs.conclusion }}
+          FINDINGS: ${{ steps.skill.outputs.findings_count }}
+          LOOP: ${{ steps.loop.outputs.conclusion }}
+          ITER: ${{ steps.loop.outputs.iterations }}
+          RESUME: ${{ steps.resume.outputs.conclusion }}
+          RESUMED: ${{ steps.resume.outputs.resumed }}
+          REPORT: ${{ steps.resume.outputs.report_dir }}
+        run: |
+          echo "skill=$SKILL findings=$FINDINGS | loop=$LOOP iterations=$ITER | resume=$RESUME resumed=$RESUMED"
+          echo "--- turn 3 answer:"; cat "$REPORT/final.md"; echo
+          test "$SKILL" = success
+          test "$FINDINGS" -ge 1
+          test "$LOOP" = success
+          test "$ITER" -ge 2   # the check failed once and the agent fixed it from its output
+          grep -qx 'harness-loop-ok' LOOP.md
+          grep -qx "token-$(cat "$RUNNER_TEMP/loop-token")" LOOP.md
+          test "$RESUME" = success
+          test "$RESUMED" = true
+          grep -q 'LOOP.md' "$REPORT/final.md"

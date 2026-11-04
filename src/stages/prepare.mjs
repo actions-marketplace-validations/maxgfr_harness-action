@@ -7,7 +7,7 @@ import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, se
 import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
-import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor } from '../modes.mjs';
+import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, classifyIntent } from '../modes.mjs';
 import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../harness/index.mjs';
 import { resolveEndpoint } from '../harness/providers.mjs';
 import { installSkills } from '../skills.mjs';
@@ -93,9 +93,14 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   core.info(`Mode: ${modeInfo.mode} (${modeInfo.reason}); ${access.reason}.`);
 
   const { adapter, adapterId, meta, version } = resolveHarness(inputs.harness, inputs.harnessVersion);
-  const loop = loopSettings(inputs);
   const thread0 = sessionThread(inputs, ctx, modeInfo.mode);
-  const tools = effectiveTools(inputs.tools, modeInfo.mode);
+  // Tag mode answers questions (read-only, with recommendations) and changes code only when
+  // asked to. An explicit `tools` input always wins.
+  let intent = 'do';
+  if (modeInfo.mode === 'tag' && inputs.askMode !== 'off') intent = inputs.askMode === 'always' ? 'ask' : classifyIntent(modeInfo.triggerText, inputs.triggerPhrase);
+  const tools = intent === 'ask' && inputs.tools === 'auto' ? 'read-only' : effectiveTools(inputs.tools, modeInfo.mode);
+  const loop = intent === 'ask' && tools === 'read-only' ? { maxIterations: 1, until: '' } : loopSettings(inputs);
+  core.info(`Intent: ${intent === 'ask' ? 'answer (read-only, recommendations)' : 'act'} · tools: ${tools}.`);
   const perms = permissionProfile(tools, inputs.allowBash);
   const model = { ...splitModel(inputs.model), raw: inputs.model };
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
@@ -144,10 +149,39 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       }
     }
 
+    // --- conversation: restored here from an artifact, or by the cache step that follows ---------
+    const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
+    let savedBranch = '';
+    if (thread0) {
+      if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
+      fs.mkdirSync(sessionDir, { recursive: true });
+      core.info(`Conversation: ${thread0}.`);
+      if (inputs.sessionStore === 'artifact' && !env.HARNESS_SESSION_KEEP) {
+        const r = await restoreSessionArtifact({ github, owner: ctx.owner, repo: ctx.repo, name: sessionArtifactName(adapterId, thread0), dir: sessionDir, tmpDir: stateDir })
+          .catch((err) => ({ restored: false, reason: `could not restore it: ${err.message}` }));
+        if (r.restored || /no saved/.test(r.reason)) core.info(`Saved conversation: ${r.reason}.`);
+        else core.warning(`Saved conversation: ${r.reason}.`);
+      }
+      try { savedBranch = JSON.parse(fs.readFileSync(path.join(sessionDir, 'meta.json'), 'utf8')).branch ?? ''; } catch {}
+    }
+
     // Commit target decided now, so the right branch is checked out before credentials go away.
     let commitMode = inputs.commitMode;
     if (commitMode === 'auto') commitMode = modeInfo.mode === 'tag' ? (isPR ? 'pr-branch' : 'new-branch') : inputs.openPr ? 'new-branch' : 'none';
     if (!perms.edit) commitMode = 'none';
+    // An issue conversation keeps working on the branch it created in an earlier turn.
+    let targetBranch = '';
+    if (commitMode === 'new-branch' && savedBranch && !isPR && isRepo(workDir)) {
+      try {
+        git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${savedBranch}:refs/remotes/origin/${savedBranch}`], workDir);
+        git(['checkout', '-B', savedBranch, `origin/${savedBranch}`], workDir);
+        commitMode = 'continue-branch';
+        targetBranch = savedBranch;
+        core.info(`Continuing on ${savedBranch}, the branch of this conversation.`);
+      } catch {
+        core.info(`The conversation's branch ${savedBranch} is gone: starting a new one.`);
+      }
+    }
     if (commitMode === 'pr-branch' && (!pr || pr.isFork)) {
       core.warning(pr?.isFork ? 'The pull request comes from a fork: changes cannot be pushed to it; they are saved as a patch.' : 'commit_mode pr-branch needs a pull request; changes are saved as a patch.');
       commitMode = 'none';
@@ -193,6 +227,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     // --- prompt ---------------------------------------------------------------------------------
     const triggerComment = ctx.eventName === 'pull_request_review_comment' ? { path: ctx.comment?.path, line: ctx.comment?.line, diffHunk: ctx.comment?.diff_hunk } : null;
     const promptArgs = {
+      intent,
+      targetBranch,
       loop,
       harness: inputs.harness,
       mode: modeInfo.mode,
@@ -218,19 +254,6 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     save('followup.md', buildFollowupPrompt(promptArgs));
     fs.copyFileSync(path.join(stateDir, 'prompt.md'), path.join(reportDir, 'prompt.md'));
 
-    // --- conversation: restored here from an artifact, or by the cache step that follows ---------
-    const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
-    if (thread0) {
-      if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
-      fs.mkdirSync(sessionDir, { recursive: true });
-      core.info(`Conversation: ${thread0}${adapter.resumable ? '' : ` (${inputs.harness} cannot resume a session: earlier replies are given as context)`}.`);
-      if (inputs.sessionStore === 'artifact' && adapter.resumable && !env.HARNESS_SESSION_KEEP) {
-        const r = await restoreSessionArtifact({ github, owner: ctx.owner, repo: ctx.repo, name: sessionArtifactName(adapterId, thread0), dir: sessionDir, tmpDir: stateDir })
-          .catch((err) => ({ restored: false, reason: `could not restore it: ${err.message}` }));
-        if (r.restored || /no saved/.test(r.reason)) core.info(`Saved conversation: ${r.reason}.`);
-        else core.warning(`Saved conversation: ${r.reason}.`);
-      }
-    }
 
     // --- remove persisted git credentials for the agent run --------------------------------------
     const removedCredentials = repoOk ? stripCredentials(workDir) : null;
@@ -271,6 +294,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       adapterId,
       loop,
       session: { thread: thread0, dir: thread0 ? sessionDir : '', store: inputs.sessionStore },
+      intent,
+      targetBranch,
       openPr: inputs.openPr,
     });
     return {

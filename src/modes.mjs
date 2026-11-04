@@ -68,6 +68,34 @@ export function detectMode(ctx, inputs) {
   return { mode: 'skip', reason: `no prompt and no ${phrase} trigger in this ${ctx.eventName || 'event'}`, triggerText: null };
 }
 
+// Verbs that ask for a change, at the start of the request (after "please", "can you"…).
+const DO_VERBS = [
+  'fix', 'implement', 'add', 'create', 'change', 'update', 'refactor', 'remove', 'delete', 'rename', 'write', 'make', 'apply',
+  'commit', 'push', 'open', 'migrate', 'bump', 'upgrade', 'replace', 'move', 'convert', 'rewrite', 'improve', 'optimize',
+  'optimise', 'clean', 'format', 'resolve', 'patch', 'build', 'generate', 'set', 'enable', 'disable', 'revert', 'translate', 'document',
+  'run', 'install', 'lance', 'lancer', 'exécute', 'executer', 'exécuter', 'installe',
+  'corrige', 'corriger', 'implémente', 'implementer', 'implémenter', 'ajoute', 'ajouter', 'crée', 'créer', 'cree', 'modifie', 'modifier',
+  'change', 'changer', 'supprime', 'supprimer', 'renomme', 'renommer', 'écris', 'écrire', 'fais', 'faire', 'applique', 'appliquer',
+  'mets', 'mettre', 'remplace', 'remplacer', 'déplace', 'deplace', 'refactorise', 'refactoriser', 'améliore', 'ameliore', 'nettoie',
+  'génère', 'genere', 'traduis', 'documente', 'migre', 'répare', 'repare',
+];
+const LEAD = /^(?:(?:hey|hi|ok|okay|please|pls|stp|svp|merci de|peux[- ]tu|tu peux|pourrais[- ]tu|can you|could you|would you|go ahead and|now|maintenant|alors|and|et|also|aussi)[\s,:!-]+)*/i;
+
+/**
+ * Tag mode: is this a question (answer it, read-only, with recommendations) or a request to
+ * change code? `ask` / `do` right after the trigger phrase force it.
+ * @returns {'ask'|'do'}
+ */
+export function classifyIntent(text, phrase) {
+  const idx = text.toLowerCase().indexOf(phrase.toLowerCase());
+  let req = (idx >= 0 ? text.slice(idx + phrase.length) : text).trim();
+  const forced = /^(ask|do)\b[\s:,-]*/i.exec(req);
+  if (forced) return forced[1].toLowerCase();
+  req = req.replace(LEAD, '');
+  const first = (/^[\p{L}-]+/u.exec(req)?.[0] ?? '').toLowerCase();
+  return DO_VERBS.includes(first) ? 'do' : 'ask';
+}
+
 /** Does this run publish into a tracking comment on an issue / PR? */
 export function wantsTrackingComment(ctx, inputs, mode) {
   if (!ctx.number) return false;

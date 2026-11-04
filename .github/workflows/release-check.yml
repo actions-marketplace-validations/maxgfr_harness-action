@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        harness: [opencode, codex, pi]
+        harness: [opencode, codex, pi, openclaw]
     steps:
       - uses: actions/checkout@v7
       - name: Start the mock LLM

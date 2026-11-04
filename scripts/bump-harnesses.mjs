@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bump the pinned harness versions to their latest releases (npm) / latest commit (claw).
+// Bump the pinned harness versions to their latest npm releases.
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 

@@ -4,10 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
-import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { buildConfig as codexConfig } from '../../src/harness/codex.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
-import { modelRouting } from '../../src/harness/claw.mjs';
+import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
@@ -23,22 +22,24 @@ function replay(id, file) {
   return { acc, events };
 }
 
-for (const id of ['opencode', 'codex', 'pi', 'claw']) {
+const ext = (id) => (id === 'openclaw' ? 'json' : 'jsonl'); // OpenClaw prints one JSON document
+
+for (const id of ['opencode', 'codex', 'pi', 'openclaw']) {
   test(`${id}: tool run is parsed into the normalised model`, () => {
-    const { acc, events } = replay(id, `${id}-tools.jsonl`);
+    const { acc, events } = replay(id, `${id}-tools.${ext(id)}`);
     assert.match(acc.finalText, /ECHO_DONE/);
     assert.equal(acc.tools, 2, `${id} tool calls: ${acc.toolCalls}`);
     assert.ok(acc.toolCalls.some((n) => /report_finding/.test(n)));
     assert.ok(acc.inputTokens > 0);
     assert.equal(acc.errors.length, 0);
-    if (id !== 'claw') assert.ok(acc.sessionId);
+    assert.ok(acc.sessionId);
     assert.ok(events.some((e) => e.t === 'tool_result'));
   });
 
   test(`${id}: provider failure surfaces as an error`, () => {
-    const { acc } = replay(id, `${id}-error.jsonl`);
+    const { acc } = replay(id, `${id}-error.${ext(id)}`);
     assert.ok(acc.errors.length >= 1, `${id} errors`);
-    assert.match(acc.errors.at(-1), /401|auth|Unauthorized/i);
+    assert.match(acc.errors.at(-1), /401|auth|Unauthorized|sign in/i);
   });
 }
 
@@ -54,20 +55,22 @@ test('permission profiles', () => {
   assert.equal(permissionProfile('full').bash, 'all');
 });
 
-test('opencode config: permissions, MCP, custom provider, harness_config merge', () => {
-  const cfg = opencodeConfig({
-    model: { provider: 'mock', id: 'm1' },
-    endpoint: resolveEndpoint({ provider: 'mock', baseUrl: 'http://x/v1', apiKeyEnv: 'K' }),
-    perms: permissionProfile('edit', ['npm test*']),
-    mcpServers: { harness: { command: 'node', args: ['s.mjs'], env: { A: '1' } }, docs: { url: 'https://d/mcp' } },
-    harnessConfig: { permission: { webfetch: 'allow' } },
-  });
-  assert.deepEqual(cfg.permission.bash, { '*': 'deny', 'npm test*': 'allow' });
-  assert.equal(cfg.permission.edit, 'allow');
-  assert.equal(cfg.permission.webfetch, 'allow');
-  assert.deepEqual(cfg.mcp.harness.command, ['node', 's.mjs']);
-  assert.equal(cfg.mcp.docs.type, 'remote');
-  assert.equal(cfg.provider.mock.options.apiKey, '{env:K}');
+test('openclaw config: tool search off, permissions as deny lists, env-referenced key, skills dir', () => {
+  const base = { model: { provider: 'mock', id: 'm1' }, mcpServers: { harness: { command: 'node', args: ['s.mjs'], env: { A: '1' } } }, workDir: '/w', skillsDir: '/h/.agents/skills' };
+  const ro = openclawConfig({ ...base, endpoint: resolveEndpoint({ provider: 'mock', baseUrl: 'http://x/v1', apiKeyEnv: 'K' }), perms: permissionProfile('read-only') });
+  assert.equal(ro.tools.toolSearch, false);
+  for (const t of ['write', 'edit', 'apply_patch', 'exec', 'web_fetch', 'ask_user']) assert.ok(ro.tools.deny.includes(t), t);
+  assert.equal(ro.tools.exec.mode, 'deny');
+  assert.deepEqual(ro.models.providers.mock.apiKey, { source: 'env', provider: 'env', id: 'K' }); // never the key itself
+  assert.deepEqual(ro.secrets.providers.env, { source: 'env' });
+  assert.deepEqual(ro.skills.load.extraDirs, ['/h/.agents/skills']);
+  assert.equal(ro.agents.defaults.workspace, '/w');
+  assert.deepEqual(ro.mcp.servers.harness, { command: 'node', args: ['s.mjs'], env: { A: '1' } });
+  const full = openclawConfig({ ...base, model: { provider: 'anthropic', id: 'claude-haiku-5-5' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), perms: permissionProfile('full') });
+  assert.ok(!full.tools.deny.includes('exec'));
+  assert.equal(full.tools.exec.mode, 'full');
+  assert.equal(full.models, undefined); // a built-in provider needs no provider block
+  assert.equal(full.agents.defaults.model, 'anthropic/claude-haiku-5-5');
 });
 
 test('codex config: sandbox, providers, MCP auto-approval', () => {
@@ -87,12 +90,14 @@ test('pi tool list keeps MCP tools', () => {
   assert.ok(toolList(permissionProfile('full')).includes('bash'));
 });
 
-test('claw model routing', () => {
-  assert.equal(modelRouting({ model: { provider: 'anthropic', id: 'claude-sonnet-5-5' }, endpoint: resolveEndpoint({ provider: 'anthropic' }) }).modelArg, 'claude-sonnet-5-5');
-  const or = modelRouting({ model: { provider: 'openrouter', id: 'qwen/qwen3-coder' }, endpoint: resolveEndpoint({ provider: 'openrouter' }) });
-  assert.equal(or.modelArg, 'openai/qwen/qwen3-coder');
-  assert.equal(or.env.OPENAI_BASE_URL, 'https://openrouter.ai/api/v1');
-  assert.equal(or.env.OPENAI_API_KEY, '$env:OPENROUTER_API_KEY');
+test('openclaw command: the action picks the session id, then reuses it', () => {
+  const a = getAdapter('openclaw');
+  const first = a.command({ prepared: { newSessionId: 'new-id' }, prompt: 'hi', extraArgs: [], sessionId: null, timeoutMinutes: 2 });
+  assert.equal(first.sessionId, 'new-id');
+  assert.deepEqual(first.args.slice(0, 4), ['agent', '--local', '--session-id', 'new-id']);
+  assert.ok(first.args.includes('--json'));
+  assert.equal(first.args[first.args.indexOf('--timeout') + 1], '120');
+  assert.equal(a.command({ prepared: { newSessionId: 'new-id' }, prompt: 'hi', extraArgs: [], sessionId: 'old-id' }).sessionId, 'old-id');
 });
 
 test('splitArgs honours quotes', () => {

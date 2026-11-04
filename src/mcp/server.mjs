@@ -157,7 +157,7 @@ function serve() {
   }
 
   // Framing is auto-detected: the MCP spec says newline-delimited JSON, but some clients
-  // (claw-code) speak LSP-style `Content-Length` headers. Answer in the framing we were spoken to.
+  // speak LSP-style `Content-Length` headers. Answer in the framing we were spoken to.
   let framing = null;
   let buffer = Buffer.alloc(0);
   send = (msg) => {

@@ -1,14 +1,14 @@
 // Agent Skills (SKILL.md) resolution and installation.
 //
-// Skills land in an ISOLATED home ($HOME/.agents/skills, mirrored to $HOME/.claw/skills), the
-// one user-level directory OpenCode, Codex and Pi all read (claw reads ~/.claw/skills). The
+// Skills land in an ISOLATED home ($HOME/.agents/skills), the one user-level directory OpenCode,
+// Codex and Pi all read (OpenClaw is pointed at it with skills.load.extraDirs). The
 // repository checkout is never written to, so a run never adds skills to the diff.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const REPO_SKILL_DIRS = ['.agents/skills', '.claude/skills', '.opencode/skills', '.claw/skills', '.codex/skills', '.pi/skills'];
+const REPO_SKILL_DIRS = ['.agents/skills', '.claude/skills', '.opencode/skills', '.codex/skills', '.pi/skills', '.openclaw/skills'];
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'vendor', '.venv', 'target']);
 
 export function parseSource(raw, { cwd = process.cwd() } = {}) {
@@ -111,7 +111,7 @@ function copySkill(skill, targets) {
  * @returns {{ name, description, dir, source }[]} installed skills, in precedence order
  */
 export function installSkills({ sources = [], home, workDir, token, tmpDir = os.tmpdir(), log = () => {} }) {
-  const targets = [path.join(home, '.agents', 'skills'), path.join(home, '.claw', 'skills')];
+  const targets = [path.join(home, '.agents', 'skills')];
   const installed = new Map();
 
   // 1. Skills committed to the repository, whatever harness they were written for.

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import { getInput, getBool, getList } from './core/action.mjs';
 
-export const HARNESSES = ['opencode', 'codex', 'pi', 'claw'];
+export const HARNESSES = ['opencode', 'codex', 'pi', 'openclaw'];
 const TOOLS = ['auto', 'read-only', 'edit', 'full'];
 const SEVERITIES = ['error', 'warning', 'notice'];
 
@@ -58,6 +58,7 @@ export function readInputs(env = process.env) {
     // conversation + loop
     session: oneOf('session', getInput('session', o) || 'auto', ['auto', 'on', 'off']),
     sessionKey: getInput('session_key', o).replace(/[^\w.-]+/g, '-').slice(0, 100),
+    askMode: oneOf('ask_mode', getInput('ask_mode', o) || 'auto', ['auto', 'always', 'off']),
     sessionStore: oneOf('session_store', getInput('session_store', o) || 'artifact', ['artifact', 'cache']),
     maxIterations: Math.floor(positiveNumber('max_iterations', getInput('max_iterations', o), 0)) || 0,
     loopUntil: getInput('loop_until', { ...o, trim: false }).trim(),

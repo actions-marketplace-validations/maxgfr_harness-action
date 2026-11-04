@@ -17,7 +17,7 @@ export function headSha(cwd) {
 }
 
 /** Files harnesses write into the workspace for themselves: never part of the agent's changes. */
-export const HARNESS_ARTIFACTS = [/^\.claw\/sessions\//, /^\.codex\/sessions\//, /^\.pi\/sessions\//];
+export const HARNESS_ARTIFACTS = [/^\.codex\/sessions\//, /^\.pi\/sessions\//, /^\.openclaw\//];
 const isArtifact = (file) => HARNESS_ARTIFACTS.some((re) => re.test(file));
 
 /** Files changed in the working tree (tracked + untracked), as { additions: [path], deletions: [path] }. */
@@ -41,7 +41,7 @@ export function diffPatch(cwd) {
   const env = { ...process.env, GIT_INDEX_FILE: path.isAbsolute(tmpIndex) ? tmpIndex : path.join(cwd, tmpIndex) };
   try {
     git(['read-tree', 'HEAD'], cwd, { env });
-    git(['add', '-A', '--', '.', ':(exclude).claw/sessions', ':(exclude).codex/sessions', ':(exclude).pi/sessions'], cwd, { env });
+    git(['add', '-A', '--', '.', ':(exclude).codex/sessions', ':(exclude).pi/sessions', ':(exclude).openclaw'], cwd, { env });
     return git(['diff', '--cached', '--binary', 'HEAD'], cwd, { env });
   } finally {
     fs.rmSync(env.GIT_INDEX_FILE, { force: true });

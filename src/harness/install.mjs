@@ -21,26 +21,3 @@ export function npmInstall({ pkg, version, bin, toolsDir, log = () => {} }) {
   if (!fs.existsSync(binPath)) throw new Error(`${pkg}@${version} installed but ${binPath} is missing`);
   return binPath;
 }
-
-/** Build a Rust harness from a pinned commit. Cached by SHA. */
-export function cargoBuild({ repo, version, bin, toolsDir, subdir = 'rust', log = () => {} }) {
-  const dir = path.join(toolsDir, `${bin}-${version}`);
-  const binPath = path.join(dir, 'bin', bin);
-  if (fs.existsSync(binPath)) {
-    log(`${bin}@${version.slice(0, 12)} restored from ${dir}`);
-    return binPath;
-  }
-  const src = path.join(dir, 'src');
-  fs.rmSync(src, { recursive: true, force: true });
-  fs.mkdirSync(src, { recursive: true });
-  log(`Building ${bin} from ${repo}@${version.slice(0, 12)} (cargo, release)`);
-  run('git', ['init', '-q', src]);
-  run('git', ['-C', src, 'fetch', '-q', '--depth', '1', repo, version]);
-  run('git', ['-C', src, 'checkout', '-q', 'FETCH_HEAD']);
-  run('cargo', ['build', '--release', '--locked', '--bin', bin], { cwd: path.join(src, subdir), stdio: ['ignore', 'pipe', 'inherit'] });
-  fs.mkdirSync(path.dirname(binPath), { recursive: true });
-  fs.copyFileSync(path.join(src, subdir, 'target', 'release', bin), binPath);
-  fs.chmodSync(binPath, 0o755);
-  fs.rmSync(src, { recursive: true, force: true }); // keep only the binary in the cache
-  return binPath;
-}

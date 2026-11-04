@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
-const SHELL_TOOLS = /^(bash|exec_command|shell|run_shell_command|local_shell|Bash|run_command)$/;
+const SHELL_TOOLS = /^(bash|exec_command|shell|run_shell_command|local_shell|Bash|run_command|exec)$/;
 
 export function flattenTools(tools = []) {
   const out = [];

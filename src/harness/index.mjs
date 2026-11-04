@@ -10,39 +10,30 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import opencode1 from './opencode.mjs';
-import opencode2 from './opencode2.mjs';
+import opencode from './opencode.mjs';
 import codex from './codex.mjs';
 import pi from './pi.mjs';
-import claw from './claw.mjs';
+import openclaw from './openclaw.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const VERSIONS = JSON.parse(fs.readFileSync(path.join(HERE, 'versions.json'), 'utf8'));
 export const MCP_SERVER = path.resolve(HERE, '..', 'mcp', 'server.mjs');
 
-const ADAPTERS = { opencode: opencode2, 'opencode-v1': opencode1, codex, pi, claw };
+export const HARNESS_IDS = ['opencode', 'codex', 'pi', 'openclaw'];
+const ADAPTERS = { opencode, codex, pi, openclaw };
 
 export function getAdapter(id) {
   const a = ADAPTERS[id];
-  if (!a) throw new Error(`Unknown harness "${id}" (expected one of opencode, codex, pi, claw)`);
+  if (!a) throw new Error(`Unknown harness "${id}" (expected one of ${HARNESS_IDS.join(', ')})`);
   return a;
 }
 
-/**
- * The harness the inputs ask for. `opencode` is OpenCode 2 (@opencode/cli); a 1.x version
- * (`harness_version: 1` or `1.19.5`) selects the OpenCode 1 adapter (opencode-ai).
- * @returns {{ id, adapterId, adapter, meta, version }}
- */
+/** @returns {{ id, adapterId, adapter, meta, version }} */
 export function resolveHarness(id, requested = '') {
-  let adapterId = id;
-  let version = requested;
-  if (id === 'opencode') {
-    if (/^1(\.|$)/.test(requested)) adapterId = 'opencode-v1';
-    if (requested === '1' || requested === '2') version = '';
-  }
-  const meta = VERSIONS[adapterId];
-  if (!meta || adapterId === 'opencode-v1' && id !== 'opencode') throw new Error(`Unknown harness "${id}" (expected one of opencode, codex, pi, claw)`);
-  return { id, adapterId, adapter: getAdapter(adapterId), meta, version: version || meta.version };
+  const adapter = getAdapter(id);
+  const meta = VERSIONS[id];
+  if (id === 'opencode' && /^[01](\.|$)/.test(requested)) throw new Error(`harness_version ${requested}: only OpenCode 2 (@opencode/cli 2.x) is supported`);
+  return { id, adapterId: id, adapter, meta, version: requested || meta.version };
 }
 
 /**

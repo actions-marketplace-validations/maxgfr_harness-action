@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectMode, containsTrigger, keepCommentAuthor, checkAccess } from '../../src/modes.mjs';
+import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
 import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
@@ -40,6 +40,14 @@ test('mode detection', () => {
   assert.equal(detectMode(ctx('pull_request', 'opened', prBody), inputs()).mode, 'tag');
   assert.equal(detectMode(ctx('pull_request', 'opened', prBody), inputs({ prompt: 'review' })).mode, 'automation');
   assert.equal(detectMode(ctx('issue_comment', 'created', { comment: { body: '@harness go' } }), inputs({ prompt: 'extra' })).mode, 'tag');
+});
+
+test('tag mode intent: questions are answered, action verbs act', () => {
+  const p = '@harness';
+  for (const q of ['@harness why is the build slow?', '@harness what do you recommend for caching?', '@harness pourquoi ce test échoue ?', '@harness how would you fix the login bug?', '@harness est-ce que ce code est sûr ?', '@harness review this approach']) assert.equal(classifyIntent(q, p), 'ask', q);
+  for (const d of ['@harness fix the flaky test', '@harness please add a --json flag', '@harness can you implement retries?', '@harness corrige le bug de login', '@harness peux-tu ajouter des tests', '@harness run the echo check', 'Create DONE.md @harness create DONE.md']) assert.equal(classifyIntent(d, p), 'do', d);
+  assert.equal(classifyIntent('@harness do whatever you recommend', p), 'do');
+  assert.equal(classifyIntent('@harness ask: fix or rewrite?', p), 'ask');
 });
 
 test('inputs: validation and defaults', () => {
@@ -137,7 +145,7 @@ test('skills are installed into the isolated home, repository skills included', 
   fs.writeFileSync(path.join(work, '.claude', 'skills', 'local-one', 'SKILL.md'), '---\nname: local-one\ndescription: d\n---\n');
   const list = installSkills({ sources: [path.join(ROOT, 'test', 'fixtures', 'skills')], home: path.join(tmp, 'home'), workDir: work });
   assert.deepEqual(list.map((s) => s.name).sort(), ['echo-check', 'local-one']);
-  for (const base of ['.agents/skills', '.claw/skills']) assert.ok(fs.existsSync(path.join(tmp, 'home', base, 'echo-check', 'SKILL.md')));
+  for (const base of ['.agents/skills']) assert.ok(fs.existsSync(path.join(tmp, 'home', base, 'echo-check', 'SKILL.md')));
 });
 
 test('diff → commentable lines', () => {
@@ -155,7 +163,8 @@ test('prompt mentions the skill and the harness-specific MCP tool names', () => 
   const base = { mode: 'automation', ctx: { repoFull: 'o/r', eventName: 'push', actor: 'a' }, perms: { level: 'read-only', bash: 'none', edit: false }, skills: [{ name: 's1', description: 'd', dir: '/h/s1' }], skill: 's1', request: 'do it' };
   assert.match(buildPrompt({ ...base, harness: 'opencode' }), /harness_report_finding/);
   assert.match(buildPrompt({ ...base, harness: 'codex' }), /\$s1/);
-  assert.match(buildPrompt({ ...base, harness: 'claw' }), /mcp__harness__report_finding/);
+  assert.match(buildPrompt({ ...base, harness: 'pi' }), /mcp__harness__report_finding/);
+  assert.match(buildPrompt({ ...base, harness: 'openclaw' }), /harness__report_finding/);
 });
 
 test('mock LLM resolves steps against each harness tool shape', () => {

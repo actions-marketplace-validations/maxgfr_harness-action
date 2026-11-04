@@ -1,0 +1,7 @@
+{
+  "ok": false,
+  "error": {
+    "type": "cli_error",
+    "message": "⚠️ Couldn't sign in to the AI service. Sign in again under Models in the Control UI or run `openclaw configure`."
+  }
+}
