@@ -1,5 +1,5 @@
 name: harness-action
-description: Run an open-source coding-agent harness (OpenCode, Codex, Pi, OpenClaw) in GitHub Actions — any model, any Agent Skill, conversations, loops, signed commits, reviews.
+description: 'Run a coding-agent harness (OpenCode, Codex, Pi, OpenClaw) in GitHub Actions: any model, any skill, chat, loops.'
 author: maxgfr
 
 branding:
