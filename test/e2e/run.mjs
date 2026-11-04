@@ -300,8 +300,18 @@ async function conversationLoop(harness) {
   ];
   let second = null;
   if (getAdapterResumable(harness)) {
-    checks.push(['run 1: conversation saved under the PR', /harness-session-v1-.*-pr-21-100-1-\d+$/.test(first.pub.outputs.session_save_key ?? '')]);
-    second = await actionRun(envFor({ action: 'created', issue: { ...issue, number: 21, title: pr.title, pull_request: { url: 'x' } }, comment: { id: 602, body: '@harness are you still there?', user: { login: 'alice' } }, sender, repository: { default_branch: 'main' } }, 'second'), { keepSession: true });
+    // What action.yml's upload-artifact step does: zip the session dir under the given name. Then
+    // the dir is wiped, so run 2 can only resume through the artifact API.
+    const artifactName = first.pub.outputs.session_artifact ?? '';
+    const sessionDir = first.pub.outputs.session_dir;
+    checks.push(['run 1: conversation saved under the PR', /^harness-session-v1-.*-pr-21$/.test(artifactName) && fs.existsSync(path.join(sessionDir ?? '', 'meta.json'))]);
+    if (artifactName && sessionDir) {
+      const zip = path.join(tmp, 'session.zip');
+      execFileSync('zip', ['-r', '-q', zip, '.'], { cwd: sessionDir });
+      gh.addArtifact(artifactName, fs.readFileSync(zip));
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+    second = await actionRun(envFor({ action: 'created', issue: { ...issue, number: 21, title: pr.title, pull_request: { url: 'x' } }, comment: { id: 602, body: '@harness are you still there?', user: { login: 'alice' } }, sender, repository: { default_branch: 'main' } }, 'second'));
     checks.push(
       ['run 2: session resumed', second.runJson.resumed === true],
       ['run 2: the history carried run 1', /SECOND_WITH_MEMORY/.test(second.runJson.finalText ?? '')],

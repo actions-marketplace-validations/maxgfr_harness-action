@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as core from '../core/action.mjs';
-import { readInputs, sessionCachePrefix } from '../inputs.mjs';
+import { readInputs, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
 import { createClient } from '../github/api.mjs';
 import { collect, failsGate, validate } from '../contract.mjs';
 import { workingTreeChanges, diffPatch, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo } from '../git.mjs';
@@ -159,13 +159,20 @@ export async function publish({ env = process.env, stateDir }) {
     }
   }
 
-  // conversation: saved by the cache step after this one, under the PR when one was opened
+  // conversation: saved by the artifact (or cache) step after this one, under the PR when one
+  // was opened
   let sessionSaveKey = '';
+  let sessionArtifact = '';
   const sessionDir = context.session?.dir;
   if (context.session?.thread && sessionDir && fs.existsSync(path.join(sessionDir, 'meta.json'))) {
     const thread = pull ? `pr-${pull.number}` : context.session.thread;
-    // Cache entries are immutable: each save gets its own key; restore takes the newest by prefix.
-    sessionSaveKey = `${sessionCachePrefix(context.adapterId ?? inputs.harness, thread)}${env.GITHUB_RUN_ID || 'local'}-${env.GITHUB_RUN_ATTEMPT || '1'}-${Date.now()}`;
+    const id = context.adapterId ?? inputs.harness;
+    if ((context.session.store ?? inputs.sessionStore) === 'cache') {
+      // Cache entries are immutable: each save gets its own key; restore takes the newest by prefix.
+      sessionSaveKey = `${sessionCachePrefix(id, thread)}${env.GITHUB_RUN_ID || 'local'}-${env.GITHUB_RUN_ATTEMPT || '1'}-${Date.now()}`;
+    } else {
+      sessionArtifact = sessionArtifactName(id, thread);
+    }
   }
 
   // review
@@ -240,7 +247,8 @@ export async function publish({ env = process.env, stateDir }) {
   set('iterations', String(run?.iterations?.length ?? 0));
   set('resumed', String(Boolean(run?.resumed)));
   set('session_save_key', sessionSaveKey);
-  set('session_dir', sessionSaveKey ? sessionDir : '');
+  set('session_artifact', sessionArtifact);
+  set('session_dir', sessionSaveKey || sessionArtifact ? sessionDir : '');
   set('execution_file', path.join(reportDir, 'execution.jsonl'));
   set('report_dir', reportDir);
   set('branch_name', branch?.name ?? '');

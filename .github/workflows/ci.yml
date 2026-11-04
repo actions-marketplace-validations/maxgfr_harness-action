@@ -93,16 +93,19 @@ jobs:
           test "$FINDINGS" = 1
           echo "$STRUCTURED" | grep -q '"verdict":"pass"'
 
-  # Loop mode, then a second run that must resume the conversation through the REAL Actions cache.
+  # Loop mode, then a second run that must resume the conversation through the REAL store:
+  # workflow artifacts (default) or the Actions cache.
   action-conversation:
     needs: unit
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
         harness: [opencode, codex, pi]
+        store: [artifact, cache]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -126,10 +129,11 @@ jobs:
           tools: full
           loop_until: test -f DONE.md
           max_iterations: '3'
-          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}-${{ matrix.store }}
+          session_store: ${{ matrix.store }}
           on_agent_error: fail
           timeout_minutes: '5'
-      - name: Turn 2 — same conversation, restored from the cache
+      - name: Turn 2 — same conversation, restored from the store
         id: second
         uses: ./
         env:
@@ -141,7 +145,8 @@ jobs:
           api_key_env: MOCK_API_KEY
           prompt: Do you remember what you did?
           tools: read-only
-          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}
+          session_key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.harness }}-${{ matrix.store }}
+          session_store: ${{ matrix.store }}
           on_agent_error: fail
           timeout_minutes: '5'
       - name: Check

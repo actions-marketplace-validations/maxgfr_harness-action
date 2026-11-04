@@ -43,6 +43,7 @@ jobs:
       contents: write        # push branches / commits
       pull-requests: write   # reviews, PR comments
       issues: write          # issue comments
+      actions: read          # find the saved conversation (session)
     steps:
       - uses: actions/checkout@v7
       - uses: maxgfr/harness-action@v1
@@ -108,7 +109,9 @@ More in [docs/recipes.md](docs/recipes.md).
 
 ### A conversation per issue / pull request
 
-`session: auto` is the default: each `@harness` mention on the same issue or PR **resumes the same harness session**, with its full memory of earlier turns, files read and tool results. The session is saved with the Actions cache, one per harness and thread, and restored on the next mention. A resumed session gets a short follow-up prompt instead of the whole setup again.
+`session: auto` is the default: each `@harness` mention on the same issue or PR **resumes the same harness session**, with its full memory of earlier turns, files read and tool results. The session is saved as a workflow artifact, one per harness and thread, and restored on the next mention. The job needs `actions: read` to find it. A resumed session gets a short follow-up prompt instead of the whole setup again.
+
+> Why artifacts and not the Actions cache: since June 2026 the cache is [read-only for `issue_comment`](https://github.blog/changelog/2026-06-26-read-only-actions-cache-for-untrusted-triggers/) and the other low-trust triggers, which are exactly the triggers of a conversation. `session_store: cache` is still available for trusted triggers, or for jobs that set `cache-mode: write`.
 
 ```text
 @harness add a --json flag to the CLI          → branch + commit + reply
@@ -207,6 +210,7 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 | `model` | — (required) | `provider/model` |
 | `prompt` | — | set → automation mode; empty → tag mode (`@harness`, label, assignee) |
 | `session` · `session_key` | `auto` · — | conversation memory per issue / PR (`on`, `off`), or a named conversation |
+| `session_store` · `session_retention_days` | `artifact` · `30` | where conversations are kept (`artifact` or `cache`), and for how long |
 | `loop_until` · `max_iterations` | — · 1 (5 with `loop_until`) | loop until a command passes / until `task_complete` |
 | `open_pr` | `false` | open a pull request with the changes and the reply |
 | `skills` / `skill` | — | skill sources (one per line) / the skill to use |
@@ -252,7 +256,7 @@ node test/e2e/run.mjs --harness pi --scenario pr-automation
 
 The scenarios are `issue-tag`, `pr-automation` and `conversation-loop` (two runs: a loop that opens a PR, then a mention on it that must resume the session). Harnesses: `opencode`, `opencode-v1`, `codex`, `pi`, `claw`.
 
-CI runs both on every push, plus `action.yml` itself (`uses: ./`): a smoke test, and a loop + conversation test that goes through the **real** Actions cache. `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits, pull requests): comment `@harness-e2e harness=pi` on an issue or a PR of this repository (`expect=resumed` on a second comment), or run it from the Actions tab for the prompt → PR flow. `e2e-live.yml` runs real models (manual, needs provider secrets).
+CI runs both on every push, plus `action.yml` itself (`uses: ./`): a smoke test, and a loop + conversation test that goes through the **real** session stores (artifact and cache). `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits, pull requests): comment `@harness-e2e harness=pi` on an issue or a PR of this repository (`expect=resumed` on a second comment), or run it from the Actions tab for the prompt → PR flow. `e2e-live.yml` runs real models (manual, needs provider secrets).
 
 The e2e suite needs no API key. `test/mock-llm` speaks the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages APIs and replays a script, whatever harness is on the other end. `test/mock-github` records the comments, reviews, refs and GraphQL commits.
 

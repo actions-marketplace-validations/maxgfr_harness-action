@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as core from '../core/action.mjs';
-import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionCachePrefix } from '../inputs.mjs';
+import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
+import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
 import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor } from '../modes.mjs';
@@ -217,12 +218,18 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     save('followup.md', buildFollowupPrompt(promptArgs));
     fs.copyFileSync(path.join(stateDir, 'prompt.md'), path.join(reportDir, 'prompt.md'));
 
-    // --- conversation (restored by the cache step that follows) ----------------------------------
+    // --- conversation: restored here from an artifact, or by the cache step that follows ---------
     const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
     if (thread0) {
       if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
       fs.mkdirSync(sessionDir, { recursive: true });
       core.info(`Conversation: ${thread0}${adapter.resumable ? '' : ` (${inputs.harness} cannot resume a session: earlier replies are given as context)`}.`);
+      if (inputs.sessionStore === 'artifact' && adapter.resumable && !env.HARNESS_SESSION_KEEP) {
+        const r = await restoreSessionArtifact({ github, owner: ctx.owner, repo: ctx.repo, name: sessionArtifactName(adapterId, thread0), dir: sessionDir, tmpDir: stateDir })
+          .catch((err) => ({ restored: false, reason: `could not restore it: ${err.message}` }));
+        if (r.restored || /no saved/.test(r.reason)) core.info(`Saved conversation: ${r.reason}.`);
+        else core.warning(`Saved conversation: ${r.reason}.`);
+      }
     }
 
     // --- remove persisted git credentials for the agent run --------------------------------------
@@ -263,14 +270,14 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       skills: skills.map((s) => ({ name: s.name, source: s.source })),
       adapterId,
       loop,
-      session: { thread: thread0, dir: thread0 ? sessionDir : '' },
+      session: { thread: thread0, dir: thread0 ? sessionDir : '', store: inputs.sessionStore },
       openPr: inputs.openPr,
     });
     return {
       run: true,
       mode: modeInfo.mode,
       sessionDir: thread0 ? sessionDir : '',
-      sessionRestorePrefix: thread0 ? sessionCachePrefix(adapterId, thread0) : '',
+      sessionRestorePrefix: thread0 && inputs.sessionStore === 'cache' ? sessionCachePrefix(adapterId, thread0) : '',
     };
   } catch (err) {
     // The tracking comment must not stay "working…" forever.

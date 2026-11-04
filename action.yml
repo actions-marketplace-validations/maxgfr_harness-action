@@ -23,9 +23,17 @@ inputs:
 
   # ── conversation and loop ─────────────────────────────────────────────────────────────────
   session:
-    description: 'Conversation memory. `auto` (default): every mention on the same issue / PR resumes the same harness session, saved between runs with the Actions cache. `on`: also automation runs on an issue / PR. `off`: every run starts fresh.'
+    description: 'Conversation memory. `auto` (default): every mention on the same issue / PR resumes the same harness session, saved between runs (see `session_store`). `on`: also automation runs on an issue / PR. `off`: every run starts fresh.'
     required: false
     default: 'auto'
+  session_store:
+    description: 'Where conversations are saved between runs: `artifact` (default; works on every trigger, needs `actions: read` to find the previous one) or `cache` (the Actions cache — read-only on `issue_comment` and other low-trust triggers unless the job sets `cache-mode: write`).'
+    required: false
+    default: 'artifact'
+  session_retention_days:
+    description: 'How long a saved conversation is kept (artifact store), in days.'
+    required: false
+    default: '30'
   session_key:
     description: 'Explicit conversation id (letters, digits, `.`, `-`, `_`), e.g. from a workflow_dispatch input, to continue a conversation outside an issue / PR.'
     required: false
@@ -324,6 +332,18 @@ runs:
       run: node "$GITHUB_ACTION_PATH/src/cli.mjs" publish
 
     - name: Save the conversation
+      if: always() && steps.publish.outputs.session_artifact != ''
+      continue-on-error: true
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.publish.outputs.session_artifact }}
+        path: ${{ steps.publish.outputs.session_dir }}
+        retention-days: ${{ inputs.session_retention_days }}
+        include-hidden-files: true
+        overwrite: true
+        if-no-files-found: ignore
+
+    - name: Save the conversation (cache)
       if: always() && steps.publish.outputs.session_save_key != ''
       continue-on-error: true
       uses: actions/cache/save@v6

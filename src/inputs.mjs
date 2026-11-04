@@ -58,6 +58,7 @@ export function readInputs(env = process.env) {
     // conversation + loop
     session: oneOf('session', getInput('session', o) || 'auto', ['auto', 'on', 'off']),
     sessionKey: getInput('session_key', o).replace(/[^\w.-]+/g, '-').slice(0, 100),
+    sessionStore: oneOf('session_store', getInput('session_store', o) || 'artifact', ['artifact', 'cache']),
     maxIterations: Math.floor(positiveNumber('max_iterations', getInput('max_iterations', o), 0)) || 0,
     loopUntil: getInput('loop_until', { ...o, trim: false }).trim(),
     openPr: getBool('open_pr', false, o),
@@ -124,6 +125,8 @@ export function sessionThread(inputs, ctx, mode) {
 
 /** Cache key prefix of a conversation: one per harness and issue / PR (or session_key). */
 export const sessionCachePrefix = (adapterId, thread) => `harness-session-v1-${adapterId}-${thread}-`;
+/** Artifact name of a conversation (the same in every run: the newest one wins). */
+export const sessionArtifactName = (adapterId, thread) => `harness-session-v1-${adapterId}-${thread}`;
 
 /** "provider/model" → { provider, id }. A bare id keeps the harness default provider. */
 export function splitModel(model) {

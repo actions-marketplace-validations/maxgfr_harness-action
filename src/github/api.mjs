@@ -17,7 +17,7 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
     ...extra,
   });
 
-  async function request(method, path, body, { accept, raw = false, retries = 2 } = {}) {
+  async function request(method, path, body, { accept, raw = false, binary = false, retries = 2 } = {}) {
     const url = path.startsWith('http') ? path : `${apiUrl.replace(/\/$/, '')}${path}`;
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(url, {
@@ -29,6 +29,9 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
         await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
         continue;
       }
+      // (redirects are followed; fetch drops the Authorization header on a cross-origin hop,
+      // e.g. to the artifact blob storage)
+      if (binary && res.ok) return Buffer.from(await res.arrayBuffer());
       const text = await res.text();
       if (!res.ok) {
         let msg = text;

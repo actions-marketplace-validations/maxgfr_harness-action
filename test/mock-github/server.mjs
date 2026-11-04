@@ -3,6 +3,7 @@ import http from 'node:http';
 
 export function createGitHubMock({ owner = 'acme', repo = 'demo', pr = null, issue = null, diff = '', permission = 'write' } = {}) {
   const calls = [];
+  const artifacts = []; // { id, name, created_at, expired, data: Buffer }
   const comments = new Map(); // id → {id, body, user}
   let nextId = 1000;
   const base = `/repos/${owner}/${repo}`;
@@ -42,9 +43,20 @@ export function createGitHubMock({ owner = 'acme', repo = 'demo', pr = null, iss
       if (pr && p === `${base}/pulls/${pr.number}/reviews` && req.method === 'POST') return json(200, { id: 77, state: 'COMMENTED' });
       if (/\/commits\/[^/]+\/check-runs$/.test(p)) return json(200, { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', html_url: 'https://example/check' }] });
       if (p === `${base}/git/refs` && req.method === 'POST') return json(201, { ref: body.ref, object: { sha: body.sha } });
+      if (p === `${base}/actions/artifacts` && req.method === 'GET') {
+        const name = url.searchParams.get('name');
+        return json(200, { total_count: artifacts.length, artifacts: artifacts.filter((a) => !name || a.name === name).map(({ data, ...a }) => ({ ...a, archive_download_url: `http://${req.headers.host}${base}/actions/artifacts/${a.id}/zip` })) });
+      }
+      if ((m = /\/actions\/artifacts\/(\d+)\/zip$/.exec(p))) {
+        const a = artifacts.find((x) => x.id === Number(m[1]));
+        if (!a) return json(404, { message: 'Not Found' });
+        res.writeHead(200, { 'content-type': 'application/zip' });
+        return res.end(a.data);
+      }
       if (p === `${base}/pulls` && req.method === 'POST') return json(201, { number: 21, html_url: `https://github.com/${owner}/${repo}/pull/21`, head: { ref: body.head }, base: { ref: body.base } });
       json(404, { message: `mock: no route for ${req.method} ${p}` });
     });
   });
-  return { server, calls, comments };
+  const addArtifact = (name, data) => artifacts.push({ id: artifacts.length + 1, name, created_at: new Date(Date.now() + artifacts.length).toISOString(), expired: false, workflow_run: { id: 100 + artifacts.length }, data });
+  return { server, calls, comments, addArtifact };
 }

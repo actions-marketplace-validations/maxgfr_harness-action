@@ -28,7 +28,15 @@ On top of that:
 
 ## Conversations (the session cache)
 
-With `session` on (the default in tag mode), the harness session is saved with the Actions cache under `harness-session-v1-<harness>-<issue|pr>-<n>-…`. It holds the transcript: prompts, replies, and the tool calls and outputs the agent made. Caches of the default branch can be restored by any workflow of the repository, including pull requests from forks. So on a **public** repository, treat a conversation as being as public as the code. In particular, don't let the agent print secrets in a session you resume. Use `session: off` if your conversations can hold sensitive data. The restored session is read by the run step only, which has no token.
+With `session` on (the default in tag mode), the harness session is saved as a workflow artifact named `harness-session-v1-<harness>-<issue|pr>-<n>`, or with the Actions cache when `session_store: cache`. It holds the transcript: prompts, replies, and the tool calls and outputs the agent made. That is the same content as the `execution.jsonl` of the report artifact.
+
+Who can read it:
+- the artifacts of a **public** repository can be downloaded by anyone with read access;
+- the caches of the default branch can be restored by any workflow of the repository.
+
+So treat a conversation as being as public as the repository. In particular, don't let the agent print secrets in a session you resume. Use `session: off` if your conversations can hold sensitive data. Saved conversations expire after `session_retention_days`.
+
+The restored session is read by the run step only, which has no token. The agent cannot write a saved conversation itself: saving happens in a later step, and the runtime token is stripped from its environment.
 
 ## Who can trigger it
 
