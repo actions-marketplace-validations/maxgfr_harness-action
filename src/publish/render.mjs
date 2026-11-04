@@ -62,6 +62,7 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
   if (branch) {
     const pr = branch.pullUrl ? ` · [**Pull request #${branch.pullNumber} ➔**](${branch.pullUrl})` : branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : '';
     L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${pr}`);
+    if (branch.leftOut?.length) L.push('', `> ⚠️ Not committed — the job token cannot change workflow files: ${branch.leftOut.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact); a GitHub App token with the *workflows* permission as \`github_token\` can commit them.`);
   }
   if (review) L.push('', `💬 Posted a review with ${review} inline comment${review === 1 ? '' : 's'}.`);
   const loopText = loopLine(run);

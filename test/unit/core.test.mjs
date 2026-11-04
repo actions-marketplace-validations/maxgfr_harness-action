@@ -12,7 +12,7 @@ import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs'
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
 import { parseSource, parseFrontmatter, discoverSkills, installSkills } from '../../src/skills.mjs';
 import { commentableLines } from '../../src/git.mjs';
-import { branchNameFor } from '../../src/stages/publish.mjs';
+import { branchNameFor, splitWorkflowChanges } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
 
@@ -151,6 +151,13 @@ test('skills are installed into the isolated home, repository skills included', 
 test('diff → commentable lines', () => {
   const lines = commentableLines('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n-b\n+c\n+d\n e\n');
   assert.deepEqual([...lines.get('f')], [1, 2, 3, 4]);
+});
+
+test('workflow files are split from the rest of a commit', () => {
+  const { kept, workflows } = splitWorkflowChanges({ additions: ['a.js', '.github/workflows/ci.yml', '.github/dependabot.yml'], deletions: ['.github/workflows/old.yml', 'b.js'], any: true });
+  assert.deepEqual(workflows, ['.github/workflows/ci.yml', '.github/workflows/old.yml']);
+  assert.deepEqual(kept.additions, ['a.js', '.github/dependabot.yml']);
+  assert.deepEqual(kept.deletions, ['b.js']);
 });
 
 test('branch names', () => {

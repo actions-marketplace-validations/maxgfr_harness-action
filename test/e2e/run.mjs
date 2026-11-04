@@ -51,7 +51,8 @@ const SCRIPTS = {
   'issue-tag': [
     { tool: 'update_progress', args: { markdown: '- [x] read the request\n- [ ] write ECHO.md' } },
     { tool: 'report_finding', args: { file: 'README.md', line: 1, severity: 'warning', message: 'echo-check ran' } },
-    { shell: "printf 'echo-check ran\\n' > ECHO.md" },
+    // ECHO.md, plus a workflow file the job token is not allowed to commit
+    { shell: "printf 'echo-check ran\\n' > ECHO.md && mkdir -p .github/workflows && printf 'on: push\\n' > .github/workflows/agent.yml" },
     { text: 'ECHO_DONE — I created ECHO.md.' },
   ],
   'pr-automation': [
@@ -173,7 +174,12 @@ async function scenario(harness, name) {
     checks.push(
       ['eyes reaction', gh.calls.some((c) => /reactions$/.test(c.path))],
       ['branch created', gh.calls.some((c) => c.path.endsWith('/git/refs') && /refs\/heads\/harness\/issue-7-/.test(c.body?.ref))],
-      ['signed commit with ECHO.md', graphql?.body?.variables?.input?.fileChanges?.additions?.some((a) => a.path === 'ECHO.md')],
+      ['signed commit with ECHO.md, without the workflow file', (() => {
+        const commits = gh.calls.filter((c) => c.path === '/graphql').map((c) => c.body?.variables?.input?.fileChanges?.additions?.map((a) => a.path) ?? []);
+        const last = commits.at(-1) ?? [];
+        return commits.length === 2 && commits[0].includes('.github/workflows/agent.yml') && last.includes('ECHO.md') && !last.includes('.github/workflows/agent.yml');
+      })()],
+      ['workflow file reported as not committed', comments.some((b) => /Not committed[\s\S]*agent\.yml/.test(b))],
       ['create-PR link', comments.some((b) => /quick_pull=1/.test(b))],
       ['publish green', pub.code === 0],
     );

@@ -21,6 +21,11 @@ export function createGitHubMock({ owner = 'acme', repo = 'demo', pr = null, iss
 
       if (req.method === 'POST' && p === '/graphql') {
         const input = body.variables?.input;
+        // like GitHub: the job token cannot change workflow files
+        const fc = input?.fileChanges ?? {};
+        if ([...(fc.additions ?? []), ...(fc.deletions ?? [])].some((f) => /^\.github\/workflows\//.test(f.path))) {
+          return json(200, { data: null, errors: [{ type: 'FORBIDDEN', message: 'Resource not accessible by integration' }] });
+        }
         return json(200, { data: { createCommitOnBranch: { commit: { oid: 'c0ffee0000000000000000000000000000000001', url: `https://github.com/${owner}/${repo}/commit/c0ffee1`, input } } } });
       }
       if ((m = /^\/repos\/[^/]+\/[^/]+\/collaborators\/([^/]+)\/permission$/.exec(p))) return json(200, { permission, role_name: permission, user: { login: m[1] } });
