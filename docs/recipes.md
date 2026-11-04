@@ -11,7 +11,7 @@ jobs:
     permissions: { issues: write, contents: read }
     steps:
       - uses: actions/checkout@v7
-      - uses: maxgfr/harness-action@v1
+      - uses: maxgfr/harness-action@v2
         env: { GROQ_API_KEY: '${{ secrets.GROQ_API_KEY }}' }
         with:
           model: groq/llama-4-maverick
@@ -51,7 +51,7 @@ with:
   with:
     app-id: ${{ vars.APP_ID }}
     private-key: ${{ secrets.APP_PRIVATE_KEY }}
-- uses: maxgfr/harness-action@v1
+- uses: maxgfr/harness-action@v2
   with:
     github_token: ${{ steps.app.outputs.token }}
     model: anthropic/claude-sonnet-5-5

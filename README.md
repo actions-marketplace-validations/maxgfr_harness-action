@@ -7,7 +7,7 @@
 And you can **talk to it like you talk to your local coding agent**: ask it a question and it **answers with recommendations** without touching the code; ask it to do something and it does it; every mention in the same thread continues the **same session** (it remembers what it did, and keeps working on the same branch), it can **loop until your tests pass**, and a prompt typed in the Actions tab (or `gh workflow run`) comes back as a **pull request** you keep chatting with.
 
 ```yaml
-- uses: maxgfr/harness-action@v1
+- uses: maxgfr/harness-action@v2
   env:
     OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
   with:
@@ -46,7 +46,7 @@ jobs:
       actions: read          # find the saved conversation (session)
     steps:
       - uses: actions/checkout@v7
-      - uses: maxgfr/harness-action@v1
+      - uses: maxgfr/harness-action@v2
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
@@ -70,7 +70,7 @@ jobs:
     permissions: { contents: read, pull-requests: write, issues: write, security-events: write }
     steps:
       - uses: actions/checkout@v7
-      - uses: maxgfr/harness-action@v1
+      - uses: maxgfr/harness-action@v2
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
@@ -94,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: audit
-        uses: maxgfr/harness-action@v1
+        uses: maxgfr/harness-action@v2
         env: { OPENROUTER_API_KEY: '${{ secrets.OPENROUTER_API_KEY }}' }
         with:
           harness: pi
@@ -146,7 +146,7 @@ jobs:
     permissions: { contents: write, pull-requests: write, issues: write }
     steps:
       - uses: actions/checkout@v7
-      - uses: maxgfr/harness-action@v1
+      - uses: maxgfr/harness-action@v2
         env: { ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}' }
         with:
           model: anthropic/claude-sonnet-5-5

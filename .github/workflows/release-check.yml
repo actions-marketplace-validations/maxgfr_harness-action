@@ -1,6 +1,6 @@
 name: Release check
 
-# Consumes the PUBLISHED action (maxgfr/harness-action@v1), exactly like a user would.
+# Consumes the PUBLISHED action (maxgfr/harness-action@v2), exactly like a user would.
 on:
   release:
     types: [published]
@@ -9,7 +9,7 @@ on:
       ref:
         description: 'Tag or branch of maxgfr/harness-action to check'
         required: false
-        default: 'v1'
+        default: 'v2'
 
 permissions:
   contents: read
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: maxgfr/harness-action
-          ref: ${{ inputs.ref || github.event.release.tag_name || 'v1' }}
+          ref: ${{ inputs.ref || github.event.release.tag_name || 'v2' }}
           path: .published
       - id: harness
         uses: ./.published
