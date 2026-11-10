@@ -14,7 +14,7 @@ import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../
 import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt, spentLimit } from '../../src/stages/run.mjs';
 import { previousReply, conversationBranch, buildThread, ownComments, commentLister, prCheckout } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
-import { loopLine, finalBody, findingsTable } from '../../src/publish/render.mjs';
+import { loopLine, finalBody, findingsTable, summaryMarkdown } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
 
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -134,6 +134,29 @@ test('earlier replies are part of the conversation, reduced to their text', () =
   // only the footer goes: a reply that uses <sub> itself keeps everything after it
   const own = previousReply('<!-- harness-action:tracking -->\nStep 1\n<sub>a note</sub>\n\nStep 2: the important part.\n\n<sub>**pi** · `m` · 3s</sub>');
   assert.match(own, /<sub>a note<\/sub>\n\nStep 2: the important part\.$/);
+});
+
+test('a reply too long for a comment is shortened without losing the frame around it', () => {
+  const long = `Intro\n\n\`\`\`js\n${'const x = 1;\n'.repeat(8000)}\`\`\`\n\nConclusion.`; // ~100,000 characters, cut inside the code block
+  const body = finalBody({ harness: 'pi', model: 'm', runUrl: 'u', run: { durationMs: 1000, tools: 3 }, status: 'success', finalText: long, findings: [{ file: 'a.js', line: 1, severity: 'error', message: 'boom' }], branch: { name: 'b', url: 'bu', created: true } });
+  assert.ok(body.length <= 64_000, String(body.length));
+  assert.match(body, /^<!-- harness-action:tracking -->/);
+  assert.match(body, /truncated \(\d+ more characters\): the full text is in the job summary/);
+  assert.match(body, /<sub>\*\*pi\*\* · `m` · 1s · 3 tool calls · \[job run\]\(u\)<\/sub>$/); // the footer is still the last line
+  assert.equal(body.match(/<details>/g).length, body.match(/<\/details>/g).length);
+  assert.equal(body.match(/^```/gm).length % 2, 0); // the code block the cut fell in is closed
+  assert.match(finalBody({ harness: 'pi', model: 'm', runUrl: 'u', status: 'success', finalText: 'short' }), /\nshort\n/);
+});
+
+test('the job summary stays under the size the runner accepts', () => {
+  const run = { durationMs: 1000, tools: 1, inputTokens: 1, outputTokens: 1, cost: 0, costKnown: false };
+  const transcript = 'é'.repeat(900_000); // 1.8 MB of UTF-8
+  const summary = summaryMarkdown({ harness: 'pi', version: '1', model: 'm', mode: 'automation', status: 'success', run, finalText: 'RESULT', findings: [], transcript });
+  assert.ok(Buffer.byteLength(summary) <= 1_000_000, String(Buffer.byteLength(summary)));
+  assert.match(summary, /### Result\n\nRESULT/);
+  assert.match(summary, /truncated: the full log is execution\.jsonl[\s\S]*<\/details>$/);
+  const huge = summaryMarkdown({ harness: 'pi', version: '1', model: 'm', mode: 'automation', status: 'success', run, finalText: 'x'.repeat(3_000_000), findings: [], transcript });
+  assert.ok(Buffer.byteLength(huge) <= 1_000_000);
 });
 
 test('a finding title cannot break the findings table', () => {
