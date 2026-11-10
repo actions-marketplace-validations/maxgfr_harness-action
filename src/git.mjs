@@ -16,11 +16,27 @@ export function headSha(cwd) {
   return tryGit(['rev-parse', 'HEAD'], cwd)?.trim() ?? '';
 }
 
-/** Files harnesses write into the workspace for themselves: never part of the agent's changes. */
-export const HARNESS_ARTIFACTS = [/^\.codex\/sessions\//, /^\.pi\/sessions\//, /^\.openclaw\//];
+/**
+ * Top of the working tree. `git status` reports paths relative to it, whatever the directory it
+ * runs in, so files must be read from here and not from `working_directory`.
+ */
+export function repoRoot(cwd) {
+  return tryGit(['rev-parse', '--show-toplevel'], cwd)?.trim() || cwd;
+}
+
+/**
+ * Files harnesses write into their working directory for themselves: never part of the agent's
+ * changes. That directory can be anywhere in the repository (`working_directory`).
+ */
+const ARTIFACT_DIRS = ['.codex/sessions', '.pi/sessions', '.openclaw'];
+export const HARNESS_ARTIFACTS = ARTIFACT_DIRS.map((d) => new RegExp(`(?:^|/)${d.replace(/\./g, '\\.')}/`));
+const ARTIFACT_PATHSPECS = ARTIFACT_DIRS.map((d) => `:(exclude,glob)**/${d}/**`);
 const isArtifact = (file) => HARNESS_ARTIFACTS.some((re) => re.test(file));
 
-/** Files changed in the working tree (tracked + untracked), as { additions: [path], deletions: [path] }. */
+/**
+ * Files changed in the working tree (tracked + untracked), as { additions: [path], deletions: [path] }.
+ * Paths are relative to the repository root: pass `repoRoot(dir)` as `cwd` to read them back.
+ */
 export function workingTreeChanges(cwd) {
   const out = git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], cwd);
   const additions = [];
@@ -41,7 +57,7 @@ export function diffPatch(cwd) {
   const env = { ...process.env, GIT_INDEX_FILE: path.isAbsolute(tmpIndex) ? tmpIndex : path.join(cwd, tmpIndex) };
   try {
     git(['read-tree', 'HEAD'], cwd, { env });
-    git(['add', '-A', '--', '.', ':(exclude).codex/sessions', ':(exclude).pi/sessions', ':(exclude).openclaw'], cwd, { env });
+    git(['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], cwd, { env });
     return git(['diff', '--cached', '--binary', 'HEAD'], cwd, { env });
   } finally {
     fs.rmSync(env.GIT_INDEX_FILE, { force: true });

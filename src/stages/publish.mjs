@@ -5,7 +5,7 @@ import * as core from '../core/action.mjs';
 import { readInputs, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
 import { createClient } from '../github/api.mjs';
 import { collect, failsGate, validate } from '../contract.mjs';
-import { workingTreeChanges, diffPatch, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo } from '../git.mjs';
+import { workingTreeChanges, diffPatch, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 
@@ -21,12 +21,14 @@ export function branchNameFor({ template, prefix, ctx, now = new Date() }) {
   return name.replace(/[^A-Za-z0-9._/-]+/g, '-').replace(/\/{2,}/g, '/').replace(/^[-/]+|[-/.]+$/g, '');
 }
 
-async function commitChanges({ github, inputs, context, workDir, reportDir }) {
+export async function commitChanges({ github, inputs, context, workDir, reportDir }) {
   const { ctx, commitMode, pr } = context;
   if (!isRepo(workDir)) return { branch: null };
-  const changes = workingTreeChanges(workDir);
+  // The whole repository, from its root: `working_directory` may be a sub-directory of it.
+  const root = repoRoot(workDir);
+  const changes = workingTreeChanges(root);
   if (!changes.any) return { branch: null };
-  const patch = diffPatch(workDir);
+  const patch = diffPatch(root);
   fs.writeFileSync(path.join(reportDir, 'changes.patch'), patch);
   core.info(`Working tree: ${changes.additions.length} file(s) added/modified, ${changes.deletions.length} deleted.`);
   if (commitMode === 'none') {
@@ -48,7 +50,7 @@ async function commitChanges({ github, inputs, context, workDir, reportDir }) {
     await createBranch({ github, owner: ctx.owner, repo: ctx.repo, branch, sha: context.baseHead });
     created = true;
   }
-  const commitArgs = { github, owner: ctx.owner, repo: ctx.repo, branch, expectedHeadOid: context.baseHead, cwd: workDir, headline, body };
+  const commitArgs = { github, owner: ctx.owner, repo: ctx.repo, branch, expectedHeadOid: context.baseHead, cwd: root, headline, body };
   let commit;
   let leftOut = [];
   try {
