@@ -136,6 +136,30 @@ test('git configuration written by the agent runs nothing in the publish step', 
   assert.match(patch, /\+changed/);
 });
 
+test('a detached checkout does not make "HEAD" the base branch of the pull request', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'x.txt'), 'x\n');
+  const { branch } = await commit(repo, base, { context: { branchName: 'HEAD' } });
+  assert.equal(branch.base, 'main');
+  assert.match(branch.prUrl, /\/compare\/main\.\.\.harness/);
+  const onBranch = await commit(repo, base, { context: { branchName: 'develop' } });
+  assert.equal(onBranch.branch.base, 'develop');
+});
+
+test('a branch name that is already taken gets a suffix instead of losing the commit', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'x.txt'), 'x\n');
+  const taken = () => Object.assign(new Error('POST /git/refs → 422: Reference already exists'), { status: 422 });
+  const github = fakeGitHub({ onRef: (_body, calls) => { if (calls.refs.length === 1) throw taken(); } });
+  const { branch } = await commit(repo, base, { github });
+  assert.equal(github.calls.refs.length, 2);
+  assert.match(branch.name, /^harness\/issue-7-\d{8}-\d{4}-[0-9a-f]{4}$/);
+  assert.equal(github.calls.commits[0].branch.branchName, branch.name);
+  // any other refusal is still an error
+  const denied = fakeGitHub({ onRef: () => { throw Object.assign(new Error('403: Resource not accessible'), { status: 403 }); } });
+  await assert.rejects(commit(repo, base, { github: denied }), /not accessible/);
+});
+
 test('an unchanged tree commits nothing', async () => {
   const { repo, base } = makeRepo();
   const { branch, github, patch } = await commit(repo, base);
