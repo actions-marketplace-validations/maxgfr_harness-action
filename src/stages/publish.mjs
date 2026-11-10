@@ -5,7 +5,7 @@ import * as core from '../core/action.mjs';
 import { readInputs, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
 import { createClient } from '../github/api.mjs';
 import { collect, failsGate, validate } from '../contract.mjs';
-import { workingTreeChanges, diffPatch, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
+import { treeChanges, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 
@@ -26,10 +26,11 @@ export async function commitChanges({ github, inputs, context, workDir, reportDi
   if (!isRepo(workDir)) return { branch: null };
   // The whole repository, from its root: `working_directory` may be a sub-directory of it.
   const root = repoRoot(workDir);
-  const changes = workingTreeChanges(root);
+  // Compared with the commit the run started from: an agent that committed locally (it is told
+  // not to) still gets its work published.
+  const changes = treeChanges(root, context.baseHead || 'HEAD');
   if (!changes.any) return { branch: null };
-  const patch = diffPatch(root);
-  fs.writeFileSync(path.join(reportDir, 'changes.patch'), patch);
+  fs.writeFileSync(path.join(reportDir, 'changes.patch'), changes.patch);
   core.info(`Working tree: ${changes.additions.length} file(s) added/modified, ${changes.deletions.length} deleted.`);
   if (commitMode === 'none') {
     core.notice(`The agent changed ${changes.additions.length + changes.deletions.length} file(s); commit_mode is none, so they are only saved as changes.patch in the artifact.`);

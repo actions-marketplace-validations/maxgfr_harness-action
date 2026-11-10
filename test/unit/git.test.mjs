@@ -75,3 +75,25 @@ test('working_directory in a sub-directory: files are read from the repository r
   assert.match(patch, /README\.md/); // the patch covers the whole repository too
   assert.doesNotMatch(patch, /\.codex/);
 });
+
+test('work the agent committed locally is still published, on top of the commit the run started from', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'committed.txt'), 'committed by the agent\n');
+  fs.rmSync(path.join(repo, 'README.md'));
+  commitAll(repo, 'agent commit'); // the tree is clean now
+  fs.writeFileSync(path.join(repo, 'later.txt'), 'left uncommitted\n');
+  const { github, patch } = await commit(repo, base);
+  const { fileChanges, expectedHeadOid } = github.calls.commits[0];
+  assert.deepEqual(fileChanges.additions.map((a) => a.path).sort(), ['committed.txt', 'later.txt']);
+  assert.deepEqual(fileChanges.deletions, [{ path: 'README.md' }]);
+  assert.equal(expectedHeadOid, base);
+  assert.match(patch, /committed by the agent/);
+});
+
+test('an unchanged tree commits nothing', async () => {
+  const { repo, base } = makeRepo();
+  const { branch, github, patch } = await commit(repo, base);
+  assert.equal(branch, null);
+  assert.equal(github.calls.commits.length, 0);
+  assert.equal(patch, '');
+});

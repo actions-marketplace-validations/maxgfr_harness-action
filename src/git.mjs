@@ -34,31 +34,32 @@ const ARTIFACT_PATHSPECS = ARTIFACT_DIRS.map((d) => `:(exclude,glob)**/${d}/**`)
 const isArtifact = (file) => HARNESS_ARTIFACTS.some((re) => re.test(file));
 
 /**
- * Files changed in the working tree (tracked + untracked), as { additions: [path], deletions: [path] }.
+ * What the working tree changes compared with the commit `base` (untracked files included), as
+ * { additions: [path], deletions: [path], any, patch }.
+ *
+ * `base` is the commit the run started from, not the current HEAD: an agent that ran `git commit`
+ * leaves a clean tree, and its work would otherwise be lost. The comparison goes through a
+ * scratch index, so neither the index nor HEAD of the checkout is touched.
+ *
  * Paths are relative to the repository root: pass `repoRoot(dir)` as `cwd` to read them back.
  */
-export function workingTreeChanges(cwd) {
-  const out = git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], cwd);
-  const additions = [];
-  const deletions = [];
-  for (const entry of out.split('\0').filter(Boolean)) {
-    const code = entry.slice(0, 2);
-    const file = entry.slice(3);
-    if (isArtifact(file)) continue;
-    if (code.includes('D')) deletions.push(file);
-    else additions.push(file);
-  }
-  return { additions, deletions, any: additions.length + deletions.length > 0 };
-}
-
-export function diffPatch(cwd) {
-  // Include untracked files without touching the index permanently.
+export function treeChanges(cwd, base = 'HEAD') {
   const tmpIndex = path.join(git(['rev-parse', '--git-dir'], cwd).trim(), 'harness-index');
   const env = { ...process.env, GIT_INDEX_FILE: path.isAbsolute(tmpIndex) ? tmpIndex : path.join(cwd, tmpIndex) };
   try {
-    git(['read-tree', 'HEAD'], cwd, { env });
+    git(['read-tree', base], cwd, { env });
     git(['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], cwd, { env });
-    return git(['diff', '--cached', '--binary', 'HEAD'], cwd, { env });
+    const additions = [];
+    const deletions = [];
+    // `-z --name-status`: status NUL path NUL …
+    const fields = git(['diff', '--cached', '--name-status', '-z', '--no-renames', base], cwd, { env }).split('\0');
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      const file = fields[i + 1];
+      if (isArtifact(file)) continue;
+      (fields[i] === 'D' ? deletions : additions).push(file);
+    }
+    const any = additions.length + deletions.length > 0;
+    return { additions, deletions, any, patch: any ? git(['diff', '--cached', '--binary', base], cwd, { env }) : '' };
   } finally {
     fs.rmSync(env.GIT_INDEX_FILE, { force: true });
   }
