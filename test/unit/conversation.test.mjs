@@ -12,7 +12,7 @@ import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/h
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
 import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId } from '../../src/stages/run.mjs';
-import { previousReply, conversationBranch, buildThread, ownComments } from '../../src/stages/prepare.mjs';
+import { previousReply, conversationBranch, buildThread, ownComments, commentLister } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
 import { loopLine, finalBody } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
@@ -194,6 +194,31 @@ test('the hidden markers only count on comments written by the action itself', a
   github = client(null);
   assert.equal((await ownComments(github)([comments[2]])).size, 0);
   assert.deepEqual(calls, []);
+});
+
+test('the thread lists the issue comments once and fetches its parts concurrently', async () => {
+  const calls = [];
+  let inFlight = 0;
+  let peak = 0;
+  const slow = async (p, value) => {
+    calls.push(p);
+    peak = Math.max(peak, ++inFlight);
+    await new Promise((r) => setTimeout(r, 20));
+    inFlight--;
+    return value;
+  };
+  const github = {
+    get: (p) => slow(p, { title: 'T', body: 'B', state: 'open', user: { login: 'alice' } }),
+    paginate: (p) => slow(p, p.endsWith('/issues/12/comments') ? [{ id: 1, user: { login: 'bob' }, created_at: 't', body: 'hello' }] : []),
+  };
+  const ctx = { owner: 'o', repo: 'r', number: 12 };
+  const listComments = commentLister(github, ctx);
+  await listComments(); // what the sticky-comment lookup does first
+  const { markdown } = await buildThread({ github, ctx, inputs: inputs(), isPR: true, own: ownComments(github), listComments });
+  assert.match(markdown, /## @bob[^#]*hello/);
+  assert.equal(calls.filter((p) => p.endsWith('/issues/12/comments')).length, 1);
+  assert.deepEqual(calls.sort(), ['/repos/o/r/issues/12/comments', '/repos/o/r/pulls/12', '/repos/o/r/pulls/12/comments']);
+  assert.equal(peak, 2); // the pull request and its review comments, together
 });
 
 test('a restored conversation cannot redirect the next commit or smuggle an option', () => {

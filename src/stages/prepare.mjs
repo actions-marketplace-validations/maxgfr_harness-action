@@ -85,10 +85,23 @@ export function ownComments(github) {
   };
 }
 
-export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own }) {
+/**
+ * The comments of the issue / pull request, listed once per run however many callers ask (the
+ * sticky-comment lookup and the thread both need them).
+ */
+export function commentLister(github, ctx) {
+  let list = null;
+  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 }));
+}
+
+export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own, listComments = commentLister(github, ctx) }) {
   const { owner, repo, number } = ctx;
-  const entity = isPR ? await github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? (await github.get(`/repos/${owner}/${repo}/issues/${number}`));
-  const comments = await github.paginate(`/repos/${owner}/${repo}/issues/${number}/comments`, { max: 300 });
+  // independent requests: one round trip instead of three
+  const [entity, comments, reviews] = await Promise.all([
+    isPR ? github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? github.get(`/repos/${owner}/${repo}/issues/${number}`),
+    listComments(),
+    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 }) : [],
+  ]);
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
   const mine = await own(comments);
   const ours = (c) => mine.has(c.id);
@@ -103,7 +116,6 @@ export async function buildThread({ github, ctx, inputs, isPR, currentCommentId,
     }
   }
   if (isPR) {
-    const reviews = await github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 });
     const kept = reviews.filter(keep);
     if (kept.length) {
       L.push('', '# Review comments');
@@ -166,6 +178,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const isPR = ctx.isPR;
 
   const own = ownComments(github);
+  const listComments = commentLister(github, ctx);
 
   // --- tracking comment ----------------------------------------------------------------------
   let trackingCommentId = null;
@@ -180,7 +193,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const body = workingBody({ harness: inputs.harness, model: inputs.model, runUrl: ctx.runUrl, sticky });
     try {
       if (sticky) {
-        const comments = await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 });
+        const comments = await listComments();
         const mine = await own(comments);
         const existing = comments.find((c) => c.body?.includes(sticky) && mine.has(c.id));
         if (existing) { await github.patch(`/repos/${ctx.owner}/${ctx.repo}/issues/comments/${existing.id}`, { body }); trackingCommentId = existing.id; }
@@ -200,15 +213,18 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     let changedFiles = [];
     let thread = null;
     if (ctx.number && (modeInfo.mode === 'tag' || isPR)) {
-      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId, own });
+      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId, own, listComments });
       thread = t.markdown;
       save('thread.md', thread);
       if (isPR) {
         const p = t.entity;
         pr = { number: p.number, headRef: p.head.ref, headSha: p.head.sha, baseRef: p.base.ref, baseSha: p.base.sha, isFork: p.head.repo?.full_name !== p.base.repo?.full_name, headRepo: p.head.repo?.full_name };
-        const diff = await github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch(() => '');
+        const [diff, files] = await Promise.all([
+          github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch(() => ''),
+          github.paginate(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}/files`, { max: 300 }),
+        ]);
         save('pr.diff', diff.length > MAX_DIFF ? diff.slice(0, MAX_DIFF) + '\n…diff truncated…\n' : diff);
-        changedFiles = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}/files`, { max: 300 })).map((f) => ({ filename: f.filename, status: f.status, additions: f.additions, deletions: f.deletions }));
+        changedFiles = files.map((f) => ({ filename: f.filename, status: f.status, additions: f.additions, deletions: f.deletions }));
       }
     }
 
