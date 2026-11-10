@@ -90,17 +90,35 @@ function git(args, opts = {}) {
   return execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
 }
 
-function cloneSource(src, dest, token) {
-  const auth = token && /^https:\/\/github\.com\//.test(src.url)
-    ? ['-c', `http.https://github.com/.extraheader=AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]
-    : [];
+/**
+ * The token reaches git through its environment (`GIT_CONFIG_*`), never through the command
+ * line: Node puts the whole command line in the message of a failed command, and that message
+ * ends up in the job log and in the tracking comment.
+ */
+export function authEnv(src, token) {
+  if (!token || !/^https:\/\/github\.com\//.test(src.url)) return {};
+  return {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+  };
+}
+
+export function cloneSource(src, dest, token) {
+  const env = { ...process.env, ...authEnv(src, token) };
   const isSha = src.ref && /^[0-9a-f]{7,40}$/i.test(src.ref);
-  if (src.ref && isSha) {
-    git(['init', '-q', dest]);
-    git([...auth, '-C', dest, 'fetch', '-q', '--depth', '1', src.url, src.ref]);
-    git(['-C', dest, 'checkout', '-q', 'FETCH_HEAD']);
-  } else {
-    git([...auth, 'clone', '-q', '--depth', '1', '--single-branch', ...(src.ref ? ['--branch', src.ref] : []), src.url, dest]);
+  try {
+    if (src.ref && isSha) {
+      git(['init', '-q', dest]);
+      git(['-C', dest, 'fetch', '-q', '--depth', '1', src.url, src.ref], { env });
+      git(['-C', dest, 'checkout', '-q', 'FETCH_HEAD']);
+    } else {
+      git(['clone', '-q', '--depth', '1', '--single-branch', ...(src.ref ? ['--branch', src.ref] : []), src.url, dest], { env });
+    }
+  } catch (err) {
+    // git's own words only
+    const why = String(err.stderr ?? '').trim().split('\n').slice(-3).join(' ') || `git exited with code ${err.status ?? '?'}`;
+    throw new Error(`Cannot fetch skills from ${src.url}${src.ref ? `@${src.ref}` : ''}: ${why}`);
   }
 }
 

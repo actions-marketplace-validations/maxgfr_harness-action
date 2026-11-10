@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
 import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
-import { parseSource, parseFrontmatter, discoverSkills, installSkills } from '../../src/skills.mjs';
+import { parseSource, parseFrontmatter, discoverSkills, installSkills, cloneSource, authEnv } from '../../src/skills.mjs';
 import { commentableLines } from '../../src/git.mjs';
 import { branchNameFor, splitWorkflowChanges } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
@@ -152,6 +152,31 @@ test('skills are installed into the isolated home, repository skills included', 
   const list = installSkills({ sources: [path.join(ROOT, 'test', 'fixtures', 'skills')], home: path.join(tmp, 'home'), workDir: work });
   assert.deepEqual(list.map((s) => s.name).sort(), ['echo-check', 'local-one']);
   for (const base of ['.agents/skills']) assert.ok(fs.existsSync(path.join(tmp, 'home', base, 'echo-check', 'SKILL.md')));
+});
+
+test('a failed skills clone does not put the token in its error', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-skill-clone-'));
+  // no network: github.com is rewritten to a directory that does not exist
+  const gitconfig = path.join(tmp, 'gitconfig');
+  fs.writeFileSync(gitconfig, `[url "${path.join(tmp, 'nowhere')}/"]\n\tinsteadOf = https://github.com/\n`);
+  const saved = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = gitconfig;
+  const token = 'ghp_skillsTokenThatMustNotLeak';
+  const encoded = Buffer.from(`x-access-token:${token}`).toString('base64');
+  // git does get the header, from its environment, and only for github.com
+  const env = authEnv({ url: 'https://github.com/acme/private-skills.git' }, token);
+  assert.equal(execFileSync('git', ['config', '--get', 'http.https://github.com/.extraheader'], { env: { ...process.env, ...env }, encoding: 'utf8' }).trim(), `AUTHORIZATION: basic ${encoded}`);
+  assert.deepEqual(authEnv({ url: 'https://gitlab.com/acme/skills.git' }, token), {});
+  try {
+    for (const ref of [null, 'v1', 'abcdef1234']) {
+      let message = '';
+      try { cloneSource({ url: 'https://github.com/acme/private-skills.git', ref }, path.join(tmp, `dest-${ref}`), token); } catch (err) { message = `${err.message}\n${err.stack}`; }
+      assert.match(message, /Cannot fetch skills from https:\/\/github\.com\/acme\/private-skills\.git/, String(ref));
+      assert.ok(!message.includes(token) && !message.includes(encoded) && !/AUTHORIZATION/i.test(message), message);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved;
+  }
 });
 
 test('a skill name cannot escape the skills directory', () => {
