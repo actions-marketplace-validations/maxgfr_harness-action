@@ -240,6 +240,20 @@ test('GitHub client: a long list gives its newest items when its length is known
   }
 });
 
+test('runner: raw output cannot issue workflow commands', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-raw-'));
+  const lines = [];
+  const script = 'console.log("::add-mask::hello"); console.log("::error::made up by the agent");';
+  await runHarness({ adapter: getAdapter('opencode'), bin: process.execPath, args: ['-e', script], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: (l) => lines.push(l), showFullOutput: true });
+  const token = /^::stop-commands::([0-9a-f]{32})$/.exec(lines[0])?.[1];
+  assert.ok(token, lines[0]);
+  assert.deepEqual(lines.slice(1), ['::add-mask::hello', '::error::made up by the agent', `::${token}::`]); // commands are off in between
+  // without show_full_output nothing raw is printed, so nothing needs suspending
+  const quiet = [];
+  await runHarness({ adapter: getAdapter('opencode'), bin: process.execPath, args: ['-e', script], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec2.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: (l) => quiet.push(l) });
+  assert.ok(!quiet.some((l) => l.startsWith('::')), quiet.join('\n'));
+});
+
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {
   const base = { model: { provider: 'anthropic', id: 'm' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), mcpServers: {} };
   assert.deepEqual(opencodeConfig({ ...base, perms: permissionProfile('full') }).websearch, { provider: 'exa' });

@@ -68,6 +68,12 @@ test('inputs: validation and defaults', () => {
   assert.deepEqual(splitModel('openrouter/qwen/qwen3'), { provider: 'openrouter', id: 'qwen/qwen3' });
 });
 
+test('list inputs: lines or commas, and an escaped comma inside an item', () => {
+  assert.deepEqual(inputs({ allow_bash: 'npm test*\nnpm run lint*' }).allowBash, ['npm test*', 'npm run lint*']);
+  assert.deepEqual(inputs({ allow_bash: 'npm test*, npm run lint*' }).allowBash, ['npm test*', 'npm run lint*']);
+  assert.deepEqual(inputs({ allow_bash: 'git log --format=%h\\,%s*\nnpm test*' }).allowBash, ['git log --format=%h,%s*', 'npm test*']);
+});
+
 test('access control', async () => {
   const gh = (perm) => ({ get: async () => ({ permission: perm, role_name: perm }) });
   const ctx = { eventName: 'issue_comment', actor: 'eve', senderType: 'User', owner: 'o', repo: 'r' };

@@ -19,10 +19,11 @@ export function getBool(name, dflt = false, opts) {
   throw new Error(`Input ${name} must be a boolean, got "${v}"`);
 }
 
+/** A list input: one item per line, or separated by commas. `\,` is a comma inside an item. */
 export function getList(name, opts) {
   return getInput(name, opts)
-    .split(/[\n,]/)
-    .map((s) => s.trim())
+    .split(/\n|(?<!\\),/)
+    .map((s) => s.replace(/\\,/g, ',').trim())
     .filter(Boolean);
 }
 
