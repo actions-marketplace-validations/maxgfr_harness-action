@@ -45,6 +45,22 @@ export function redactMcpSecrets(text, mcpConfig) {
 }
 
 /**
+ * Must the working tree be moved to the head of the pull request before the agent runs?
+ *   'required'    — the changes are pushed to that branch: without it the run cannot work;
+ *   'best-effort' — a run that commits nothing (a question, `tools: read-only`) started from a
+ *                   comment: the event belongs to the issue, so the checkout is the default
+ *                   branch, and the agent would answer about the wrong code;
+ *   null          — already there, no pull request, or a fork (its code is not checked out next
+ *                   to the provider keys on a comment).
+ */
+export function prCheckout({ pr, commitMode, eventName, atHead }) {
+  if (!pr || atHead) return null;
+  if (commitMode === 'pr-branch') return 'required';
+  if (commitMode === 'none' && eventName === 'issue_comment' && !pr.isFork) return 'best-effort';
+  return null;
+}
+
+/**
  * The branch a restored conversation asks to continue on, or '' when it is not one this action
  * would have created. The value comes from a saved artifact: it is never allowed to point the
  * next commit at the default branch, at `base_branch`, or (unless a `branch_name_template`
@@ -279,11 +295,21 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     }
     const repoOk = isRepo(workDir);
     if (!repoOk && commitMode !== 'none') { core.warning(`${workDir} is not a git checkout: changes cannot be committed.`); commitMode = 'none'; }
-    if (repoOk && commitMode === 'pr-branch' && headSha(workDir) !== pr.headSha) {
+    const checkout = repoOk ? prCheckout({ pr, commitMode, eventName: ctx.eventName, atHead: headSha(workDir) === pr?.headSha }) : null;
+    if (checkout) {
       core.info(`Checking out ${pr.headRef} (${pr.headSha.slice(0, 7)})`);
-      git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${pr.headRef}:refs/remotes/origin/${pr.headRef}`], workDir);
-      git(['checkout', '-B', pr.headRef, `origin/${pr.headRef}`], workDir);
+      try {
+        git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${pr.headRef}:refs/remotes/origin/${pr.headRef}`], workDir);
+        git(['checkout', '-B', pr.headRef, `origin/${pr.headRef}`], workDir);
+      } catch (err) {
+        if (checkout === 'required') throw err;
+        core.warning(`Cannot check out ${pr.headRef}: the agent reads the pull request through its diff only. (${truncate(String(err.stderr || err.message).trim(), 300)})`);
+      }
     }
+    // Does the working tree hold the pull request's code? (a `pull_request*` event is checked
+    // out on its merge commit, except `pull_request_target`, which gets the base branch; a
+    // comment on a fork's pull request stays on the default branch)
+    const prCode = pr ? headSha(workDir) === pr.headSha || (ctx.eventName.startsWith('pull_request') && ctx.eventName !== 'pull_request_target') : false;
     if (repoOk && commitMode === 'new-branch' && inputs.baseBranch) {
       git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${inputs.baseBranch}:refs/remotes/origin/${inputs.baseBranch}`], workDir);
       git(['checkout', '-B', inputs.baseBranch, `origin/${inputs.baseBranch}`], workDir);
@@ -330,6 +356,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       request: modeInfo.mode === 'tag' ? modeInfo.triggerText : inputs.prompt,
       extraInstructions: modeInfo.mode === 'tag' ? inputs.prompt : '',
       pr,
+      prCode,
       changedFiles,
       thread: thread && thread.length < 30_000 ? thread : thread ? '(long conversation: read it with the read_thread tool)' : null,
       triggerComment,

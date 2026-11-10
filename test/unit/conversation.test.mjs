@@ -12,7 +12,7 @@ import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/h
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
 import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt } from '../../src/stages/run.mjs';
-import { previousReply, conversationBranch, buildThread, ownComments, commentLister } from '../../src/stages/prepare.mjs';
+import { previousReply, conversationBranch, buildThread, ownComments, commentLister, prCheckout } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
 import { loopLine, finalBody, findingsTable } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
@@ -187,6 +187,24 @@ test('a conversation is restored from the newest artifact of its name', async ()
   assert.match(forged.reason, /fork/);
   assert.ok(!fs.existsSync(path.join(tmp, 'forged', 'meta.json')));
   gh.server.close();
+});
+
+test('a question on a pull request is answered on the pull request code, not on the default branch', () => {
+  const pr = { number: 9, headRef: 'feat', headSha: 'abc', isFork: false };
+  // a comment event is checked out on the default branch
+  assert.equal(prCheckout({ pr, commitMode: 'none', eventName: 'issue_comment', atHead: false }), 'best-effort');
+  assert.equal(prCheckout({ pr, commitMode: 'pr-branch', eventName: 'issue_comment', atHead: false }), 'required');
+  // nothing to do: already there, a pull_request event (merge commit), no pull request
+  assert.equal(prCheckout({ pr, commitMode: 'none', eventName: 'issue_comment', atHead: true }), null);
+  assert.equal(prCheckout({ pr, commitMode: 'none', eventName: 'pull_request', atHead: false }), null);
+  assert.equal(prCheckout({ pr: null, commitMode: 'none', eventName: 'issue_comment', atHead: false }), null);
+  // a fork's code is not checked out on a comment
+  assert.equal(prCheckout({ pr: { ...pr, isFork: true }, commitMode: 'none', eventName: 'issue_comment', atHead: false }), null);
+
+  // … and when the files are not the pull request's, the prompt says so instead of the opposite
+  const p = { harness: 'pi', mode: 'tag', ctx: { eventName: 'issue_comment', action: 'created', actor: 'alice', repoFull: 'o/r', number: 9 }, request: 'why?', isPR: true, pr: { ...pr, baseRef: 'main' }, perms: { level: 'read-only', bash: 'none', edit: false }, intent: 'ask' };
+  assert.match(buildPrompt({ ...p, prCode: true }), /repository checkout \(pull request #9, branch `feat`\)/);
+  assert.match(buildPrompt({ ...p, prCode: false }), /NOT the code of pull request #9[^\n]*mcp__harness__get_pr_diff/);
 });
 
 test('the hidden markers only count on comments written by the action itself', async () => {

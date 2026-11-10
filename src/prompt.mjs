@@ -36,7 +36,12 @@ export function buildPrompt(p) {
   L.push(`You are a coding agent running non-interactively inside a GitHub Actions job for the repository **${ctx.repoFull}**. Nobody will answer questions during this run: make reasonable decisions, state your assumptions, and finish the task.`);
   L.push('');
   L.push('## Environment');
-  L.push(`- Working directory: the repository checkout${pr ? ` (pull request #${pr.number}, branch \`${pr.headRef}\`)` : ''}.`);
+  if (pr && p.prCode === false) {
+    // (a comment on a fork's pull request, or a head that could not be fetched)
+    L.push(`- Working directory: the repository checkout on its base branch — NOT the code of pull request #${pr.number}. Read the pull request's changes with ${tool('get_pr_diff')}; the files on disk do not contain them.`);
+  } else {
+    L.push(`- Working directory: the repository checkout${pr ? ` (pull request #${pr.number}, branch \`${pr.headRef}\`)` : ''}.`);
+  }
   L.push(`- Permission level: ${PERMS_TEXT[perms.level]}`);
   if (perms.bash === 'allowlist') {
     L.push(`- Allowed shell commands (glob patterns): ${allowBash.map((c) => `\`${c}\``).join(', ')}`);
