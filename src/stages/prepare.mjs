@@ -28,6 +28,23 @@ export function previousReply(body) {
 }
 
 /**
+ * A generated harness configuration as it may be shown in the report artifact, which anyone who
+ * can read the repository can download: the `headers` and `env` values of the user's MCP servers
+ * (tokens, connection strings) are replaced. Every harness config writes them as quoted strings.
+ */
+export function redactMcpSecrets(text, mcpConfig) {
+  let out = String(text);
+  for (const server of Object.values(mcpConfig ?? {})) {
+    for (const group of [server?.headers, server?.env]) {
+      for (const value of Object.values(group ?? {})) {
+        if (typeof value === 'string' && value) out = out.split(JSON.stringify(value)).join('"***"');
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * The branch a restored conversation asks to continue on, or '' when it is not one this action
  * would have created. The value comes from a saved artifact: it is never allowed to point the
  * next commit at the default branch, at `base_branch`, or (unless a `branch_name_template`
@@ -243,7 +260,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const prepared = adapter.prepare({ home, stateDir, workDir, model, endpoint, perms, mcpServers, mcpToolNames, harnessConfig: inputs.harnessConfig, warn });
     const reportDir = path.join(stateDir, 'report');
     fs.mkdirSync(path.join(reportDir, 'config'), { recursive: true });
-    for (const [name, content] of Object.entries(prepared.files ?? {})) fs.writeFileSync(path.join(reportDir, 'config', name), content);
+    for (const [name, content] of Object.entries(prepared.files ?? {})) fs.writeFileSync(path.join(reportDir, 'config', name), redactMcpSecrets(content, inputs.mcpConfig));
 
     // --- prompt ---------------------------------------------------------------------------------
     const triggerComment = ctx.eventName === 'pull_request_review_comment' ? { path: ctx.comment?.path, line: ctx.comment?.line, diffHunk: ctx.comment?.diff_hunk } : null;

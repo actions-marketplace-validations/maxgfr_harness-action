@@ -11,6 +11,8 @@ import { buildConfig as codexConfig } from '../../src/harness/codex.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
+import { redactMcpSecrets } from '../../src/stages/prepare.mjs';
+import { toToml } from '../../src/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
 
@@ -128,6 +130,29 @@ test('opencode: web search gets a keyless provider only when web access is allow
   const base = { model: { provider: 'anthropic', id: 'm' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), mcpServers: {} };
   assert.deepEqual(opencodeConfig({ ...base, perms: permissionProfile('full') }).websearch, { provider: 'exa' });
   assert.equal(opencodeConfig({ ...base, perms: permissionProfile('read-only') }).websearch, undefined);
+});
+
+test('MCP header and env values are redacted from the configs kept in the report', () => {
+  const mcpConfig = {
+    docs: { url: 'https://docs.example/mcp', headers: { Authorization: 'Bearer docs-token-123' } },
+    db: { command: 'npx', args: ['-y', 'db-mcp'], env: { DATABASE_URL: 'postgres://u:p"w@host/db', MODE: 'ro' } },
+  };
+  const mcpServers = { ...mcpConfig, harness: { command: 'node', args: ['s.mjs'], env: { HARNESS_STATE: '/tmp/state' } } };
+  const base = { model: { provider: 'openai', id: 'm' }, endpoint: resolveEndpoint({ provider: 'openai' }), perms: permissionProfile('read-only'), mcpServers, workDir: '/w', skillsDir: '/s' };
+  const configs = [
+    JSON.stringify(opencodeConfig(base), null, 2),
+    toToml(codexConfig(base), { inline: [/^mcp_servers\.[^.]+\.(env|http_headers)$/] }),
+    JSON.stringify(openclawConfig(base), null, 2),
+  ];
+  for (const text of configs) {
+    assert.match(text, /docs-token-123/); // the live config needs them
+    const shown = redactMcpSecrets(text, mcpConfig);
+    assert.doesNotMatch(shown, /docs-token-123|postgres:|p\\"w/);
+    assert.match(shown, /"\*\*\*"/);
+    assert.match(shown, /docs\.example\/mcp/); // not a secret
+    assert.match(shown, /\/tmp\/state/); // the action's own server is left alone
+  }
+  assert.equal(redactMcpSecrets('{"a":"b"}', null), '{"a":"b"}');
 });
 
 test('splitArgs honours quotes', () => {
