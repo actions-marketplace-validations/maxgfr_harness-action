@@ -147,18 +147,39 @@ const CREATE_COMMIT = `mutation($input: CreateCommitOnBranchInput!) {
   createCommitOnBranch(input: $input) { commit { oid url } }
 }`;
 
-export async function commitViaApi({ github, owner, repo, branch, expectedHeadOid, cwd, changes, headline, body }) {
+export async function commitViaApi({ github, owner, repo, branch, expectedHeadOid, cwd, changes, headline, body, retries = 2, retryDelayMs = 2000 }) {
   const additions = changes.additions.map((p) => ({ path: p, contents: fs.readFileSync(path.join(cwd, p)).toString('base64') }));
   const deletions = changes.deletions.map((p) => ({ path: p }));
-  const data = await github.graphql(CREATE_COMMIT, {
-    input: {
-      branch: { repositoryNameWithOwner: `${owner}/${repo}`, branchName: branch },
-      message: { headline, body },
-      fileChanges: { additions, deletions },
-      expectedHeadOid,
-    },
-  });
-  return data.createCommitOnBranch.commit;
+  const input = {
+    branch: { repositoryNameWithOwner: `${owner}/${repo}`, branchName: branch },
+    message: { headline, body },
+    fileChanges: { additions, deletions },
+    expectedHeadOid,
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return (await github.graphql(CREATE_COMMIT, { input })).createCommitOnBranch.commit;
+    } catch (err) {
+      // No answer at all, or a server-side failure: the only cases worth another try. A refusal
+      // (an error GitHub answered with) is final.
+      const transient = !err.status || err.status >= 500 || err.status === 429;
+      if (!transient || attempt >= retries) throw err;
+      // The commit may have been made all the same. Sending it again would then fail on
+      // `expectedHeadOid` and report a commit that exists as lost: look at the branch first.
+      const landed = await landedCommit({ github, owner, repo, branch, expectedHeadOid, headline }).catch(() => null);
+      if (landed) return landed;
+      await new Promise((r) => setTimeout(r, retryDelayMs * 2 ** attempt));
+    }
+  }
+}
+
+/** The commit this run was creating, if the branch already carries it: our headline, on top of the expected head. */
+async function landedCommit({ github, owner, repo, branch, expectedHeadOid, headline }) {
+  const head = (await github.get(`/repos/${owner}/${repo}/git/ref/heads/${branch}`))?.object?.sha;
+  if (!head || head === expectedHeadOid) return null;
+  const commit = await github.get(`/repos/${owner}/${repo}/git/commits/${head}`);
+  const ours = commit?.parents?.[0]?.sha === expectedHeadOid && String(commit.message ?? '').split('\n')[0] === headline;
+  return ours ? { oid: head, url: commit.html_url } : null;
 }
 
 export async function createBranch({ github, owner, repo, branch, sha }) {

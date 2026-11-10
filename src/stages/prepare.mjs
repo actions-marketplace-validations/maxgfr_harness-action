@@ -107,7 +107,8 @@ export function ownComments(github) {
  */
 export function commentLister(github, ctx) {
   let list = null;
-  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 }));
+  // (in a thread longer than that, the newest comments: the event says how many there are)
+  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500, total: ctx.entity?.comments ?? 0 }));
 }
 
 export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own, listComments = commentLister(github, ctx) }) {
@@ -116,7 +117,7 @@ export async function buildThread({ github, ctx, inputs, isPR, currentCommentId,
   const [entity, comments, reviews] = await Promise.all([
     isPR ? github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? github.get(`/repos/${owner}/${repo}/issues/${number}`),
     listComments(),
-    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 }) : [],
+    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300, total: ctx.payload?.pull_request?.review_comments ?? 0 }) : [],
   ]);
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
   const mine = await own(comments);

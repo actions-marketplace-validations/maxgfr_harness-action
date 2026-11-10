@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { commitChanges } from '../../src/stages/publish.mjs';
+import { commitViaApi } from '../../src/git.mjs';
 import { finalBody } from '../../src/publish/render.mjs';
 import { inputs, g, commitAll, makeRepo, runPublish } from './helpers.mjs';
 
@@ -131,6 +132,44 @@ test('a branch name that is already taken gets a suffix instead of losing the co
   // any other refusal is still an error
   const denied = fakeGitHub({ onRef: () => { throw Object.assign(new Error('403: Resource not accessible'), { status: 403 }); } });
   await assert.rejects(commit(repo, base, { github: denied }), /not accessible/);
+});
+
+test('the commit is retried when GitHub does not answer, without creating it twice', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'x.txt'), 'x\n');
+  const args = { owner: 'acme', repo: 'demo', branch: 'harness/x', expectedHeadOid: base, cwd: repo, changes: { additions: ['x.txt'], deletions: [] }, headline: 'pi: fix it', body: 'b', retryDelayMs: 1 };
+  const made = { createCommitOnBranch: { commit: { oid: 'new1', url: 'u' } } };
+  const client = ({ failures, head = base, headline = 'pi: fix it' }) => {
+    const calls = { graphql: 0, get: [] };
+    return {
+      calls,
+      graphql: async () => { if (calls.graphql++ < failures.length) throw failures[calls.graphql - 1]; return made; },
+      get: async (p) => { calls.get.push(p); return p.includes('/git/ref/') ? { object: { sha: head } } : { parents: [{ sha: base }], message: `${headline}\n\nbody`, html_url: 'https://example/landed' }; },
+    };
+  };
+  const badGateway = Object.assign(new Error('GraphQL: Bad Gateway'), { status: 502 });
+
+  // a 502, the branch has not moved: sent again
+  let github = client({ failures: [badGateway] });
+  assert.equal((await commitViaApi({ github, ...args })).oid, 'new1');
+  assert.equal(github.calls.graphql, 2);
+  // a dropped connection, but the commit was made: it is found on the branch, not sent again
+  github = client({ failures: [new TypeError('fetch failed')], head: 'landed1' });
+  assert.deepEqual(await commitViaApi({ github, ...args }), { oid: 'landed1', url: 'https://example/landed' });
+  assert.equal(github.calls.graphql, 1);
+  // the branch moved, but to somebody else's commit: not ours, so the retry goes out (and GitHub will refuse it)
+  github = client({ failures: [badGateway], head: 'other1', headline: 'unrelated push' });
+  await commitViaApi({ github, ...args });
+  assert.equal(github.calls.graphql, 2);
+  // a refusal is final
+  const refused = Object.assign(new Error('GraphQL: Resource not accessible by integration'), { status: 200 });
+  github = client({ failures: [refused] });
+  await assert.rejects(commitViaApi({ github, ...args }), /not accessible/);
+  assert.equal(github.calls.graphql, 1);
+  // GitHub stays down: the error comes out after the retries
+  github = client({ failures: [badGateway, badGateway, badGateway] });
+  await assert.rejects(commitViaApi({ github, ...args }), /Bad Gateway/);
+  assert.equal(github.calls.graphql, 3);
 });
 
 test('an unchanged tree commits nothing', async () => {

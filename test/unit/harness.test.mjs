@@ -210,6 +210,35 @@ test('GitHub client: a dropped connection is retried for a read, never for a wri
   }
 });
 
+test('GitHub client: a long list gives its newest items when its length is known; a stalled request ends', async () => {
+  const pages = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname === '/stall') return; // never answers
+    const page = Number(url.searchParams.get('page'));
+    pages.push(page);
+    const items = Array.from({ length: 730 }, (_, i) => ({ id: i })).slice((page - 1) * 100, page * 100);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(items));
+  });
+  const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1, timeoutMs: 150 });
+  try {
+    const newest = await github.paginate('/comments', { max: 200, total: 730 });
+    assert.deepEqual([newest.length, newest[0].id, newest.at(-1).id], [200, 530, 729]);
+    assert.deepEqual(pages, [6, 7, 8]); // the five pages before them are not requested
+    pages.length = 0;
+    const oldest = await github.paginate('/comments', { max: 200 }); // length unknown: as before
+    assert.deepEqual([oldest.length, oldest[0].id, oldest.at(-1).id], [200, 0, 199]);
+    assert.deepEqual(pages, [1, 2]);
+    assert.equal((await github.paginate('/comments', { max: 1000, total: 730 })).length, 730); // everything fits
+    await assert.rejects(github.post('/stall', { a: 1 }), /timeout|aborted/i);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {
   const base = { model: { provider: 'anthropic', id: 'm' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), mcpServers: {} };
   assert.deepEqual(opencodeConfig({ ...base, perms: permissionProfile('full') }).websearch, { provider: 'exa' });
