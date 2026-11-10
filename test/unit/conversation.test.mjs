@@ -95,6 +95,15 @@ test('completion check runner', async () => {
   assert.match(r.output, /boom/);
 });
 
+test('the completion check timeout stops everything the command started', async () => {
+  const started = Date.now();
+  // the shell forks `sleep`: killing the shell alone would leave it holding the output pipes
+  const r = await runCheck('echo started; sleep 20; true', { cwd: process.cwd(), env: process.env, timeoutMinutes: 0.005 });
+  assert.equal(r.code, 124);
+  assert.match(r.output, /started/);
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+});
+
 test('earlier replies are part of the conversation, reduced to their text', () => {
   const body = '<!-- harness-action:tracking -->\n✅ **pi** finished · [View job run](u)\n\n---\n\nI fixed it.\n\n<sub>**pi** · `m` · 3s</sub>';
   const r = previousReply(body);

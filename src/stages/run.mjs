@@ -24,12 +24,17 @@ export const isSessionId = (id) => typeof id === 'string' && /^[A-Za-z0-9][\w.-]
 /** Runs the completion check. Never throws. */
 export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group: the timeout must stop what the command started (`npm test` → node →
+    // …), not only the shell. Killing the shell alone leaves the rest running with the output
+    // pipes open, and this promise would wait for them.
+    const child = spawn('bash', ['-lc', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     let out = '';
     const keep = (c) => { out = (out + c).slice(-64_000); };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMinutes * 60_000);
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }, timeoutMinutes * 60_000);
     child.on('error', (err) => { clearTimeout(timer); resolve({ code: 127, output: err.message }); });
     child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code: code ?? (signal ? 124 : 1), output: out }); });
   });
