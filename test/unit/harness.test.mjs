@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runHarness } from '../../src/runner.mjs';
+import { capture } from '../../src/harness/exec.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -124,6 +125,17 @@ test('runner: exit 1 after a finished turn keeps the result; exit 1 without one 
   const bad = await run(fake([{ type: 'step_start', sessionID: 's', part: {} }], 1));
   assert.equal(bad.status, 'error');
   assert.match(bad.acc.errors.at(-1), /exited with code 1/);
+});
+
+test('runner: a harness that exits without reading its stdin is an error, not a crash', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-stdin-'));
+  // codex gets its prompt on stdin; a prompt larger than the pipe buffer is still being written
+  // when the process is already gone
+  const result = await runHarness({ adapter: getAdapter('codex'), bin: process.execPath, args: ['-e', 'process.exit(3)'], stdin: 'x'.repeat(2_000_000), cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: () => {} });
+  assert.equal(result.status, 'error');
+  assert.equal(result.exitCode, 3);
+  const helper = await capture(process.execPath, ['-e', 'process.exit(4)'], { env: process.env, cwd: tmp, stdin: 'x'.repeat(2_000_000) });
+  assert.equal(helper.code, 4);
 });
 
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {

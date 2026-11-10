@@ -89,6 +89,10 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       if (showFullOutput) process.stderr.write(c);
     });
 
+    // A harness that exits before it has read its prompt closes the pipe under us (EPIPE). The
+    // exit code and stderr say what happened; an unhandled stream error would kill this process
+    // before it can report them.
+    child.stdin.on('error', () => {});
     if (stdin != null) child.stdin.end(stdin); else child.stdin.end();
 
     const timer = setTimeout(() => kill(`timeout after ${limits.timeoutMinutes} min (timeout_minutes)`), limits.timeoutMinutes * 60_000);
