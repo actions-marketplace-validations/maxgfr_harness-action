@@ -125,6 +125,20 @@ test('runner: exit 1 after a finished turn keeps the result; exit 1 without one 
   const bad = await run(fake([{ type: 'step_start', sessionID: 's', part: {} }], 1));
   assert.equal(bad.status, 'error');
   assert.match(bad.acc.errors.at(-1), /exited with code 1/);
+
+  // a remark followed by more work is not a finished turn: the harness died in the middle
+  const midTask = [
+    { type: 'text', sessionID: 's', part: { text: 'I will start by reading the code.' } },
+    { type: 'tool_use', part: { tool: 'edit', state: { status: 'completed', input: {}, output: 'ok' } } },
+  ];
+  const crashed = await run(fake(midTask, 2));
+  assert.equal(crashed.status, 'error');
+  assert.match(crashed.acc.errors.at(-1), /exited with code 2/);
+  // … and neither is a process killed by a signal, whatever it printed last
+  const script = path.join(tmp, 'killed.mjs');
+  fs.writeFileSync(script, `console.log(${JSON.stringify(JSON.stringify(finished[1]))});\nsetTimeout(() => process.kill(process.pid, 'SIGKILL'), 50);\nsetTimeout(() => {}, 5000);\n`);
+  const killed = await run(script);
+  assert.equal(killed.status, 'error');
 });
 
 test('runner: a harness that exits without reading its stdin is an error, not a crash', async () => {
