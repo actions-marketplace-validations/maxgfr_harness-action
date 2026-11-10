@@ -134,17 +134,24 @@ export async function openPullRequest({ github, context, branch, finalText, harn
   return { number: pr.number, url: pr.html_url };
 }
 
+/** Review comments GitHub will accept (on a line of the diff) apart from the others. */
+export function splitInlineComments(inline, lines) {
+  const inside = [];
+  const outside = [];
+  for (const raw of inline) {
+    const c = { ...raw, path: String(raw.path).replace(/^\.\//, '') }; // `./a.js` is `a.js` in the diff
+    const ok = lines.get(c.path)?.has(Number(c.line)) && (!c.start_line || lines.get(c.path)?.has(Number(c.start_line)));
+    (ok ? inside : outside).push(c);
+  }
+  return { inside, outside };
+}
+
 async function postReview({ github, context, inline, stateDir }) {
   const { ctx, pr } = context;
   if (!pr || !inline.length) return { posted: 0, outside: [] };
   const diff = fs.existsSync(path.join(stateDir, 'pr.diff')) ? fs.readFileSync(path.join(stateDir, 'pr.diff'), 'utf8') : '';
   const lines = commentableLines(diff);
-  const inside = [];
-  const outside = [];
-  for (const c of inline) {
-    const ok = lines.get(c.path)?.has(Number(c.line)) && (!c.start_line || lines.get(c.path)?.has(Number(c.start_line)));
-    (ok ? inside : outside).push(c);
-  }
+  const { inside, outside } = splitInlineComments(inline, lines);
   if (!inside.length) return { posted: 0, outside };
   const comments = inside.map((c) => ({
     path: c.path,

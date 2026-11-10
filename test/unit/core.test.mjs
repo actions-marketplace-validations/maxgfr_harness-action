@@ -12,7 +12,7 @@ import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs'
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
 import { parseSource, parseFrontmatter, discoverSkills, installSkills, cloneSource, authEnv } from '../../src/skills.mjs';
 import { commentableLines } from '../../src/git.mjs';
-import { branchNameFor, splitWorkflowChanges } from '../../src/stages/publish.mjs';
+import { branchNameFor, splitWorkflowChanges, splitInlineComments } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
 
@@ -204,6 +204,29 @@ test('a skill name cannot escape the skills directory', () => {
 test('diff → commentable lines', () => {
   const lines = commentableLines('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n-b\n+c\n+d\n e\n');
   assert.deepEqual([...lines.get('f')], [1, 2, 3, 4]);
+});
+
+test('diff parsing: content that looks like a header, several files, deleted files', () => {
+  const diff = [
+    'diff --git a/notes.md b/notes.md', '--- a/notes.md', '+++ b/notes.md',
+    '@@ -1,2 +1,4 @@', ' intro', '++ counter;', '+-- a comment', ' outro', // added lines `+ counter;` and `-- a comment`
+    '@@ -10 +12,2 @@', ' ten', '+eleven', '\\ No newline at end of file',
+    'diff --git a/gone.txt b/gone.txt', '--- a/gone.txt', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-a', '--- b',
+    'diff --git a/new.txt b/new.txt', '--- /dev/null', '+++ b/new.txt', '@@ -0,0 +1 @@', '+only',
+  ].join('\n');
+  const lines = commentableLines(diff);
+  assert.deepEqual([...lines.keys()], ['notes.md', 'new.txt']);
+  assert.deepEqual([...lines.get('notes.md')], [1, 2, 3, 4, 12, 13]);
+  assert.deepEqual([...lines.get('new.txt')], [1]);
+
+  const { inside, outside } = splitInlineComments([
+    { path: './notes.md', line: 3, body: 'a' }, // `./` is how some agents write paths
+    { path: 'notes.md', line: 13, start_line: 12, body: 'b' },
+    { path: 'notes.md', line: 7, body: 'between the hunks' },
+    { path: 'gone.txt', line: 1, body: 'deleted file' },
+  ], lines);
+  assert.deepEqual(inside.map((c) => [c.path, c.line]), [['notes.md', 3], ['notes.md', 13]]);
+  assert.deepEqual(outside.map((c) => c.body), ['between the hunks', 'deleted file']);
 });
 
 test('workflow files are split from the rest of a commit', () => {

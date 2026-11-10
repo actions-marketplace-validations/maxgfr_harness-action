@@ -172,17 +172,32 @@ export function commentableLines(diff) {
   const files = new Map();
   let current = null;
   let line = 0;
+  // Lines the current hunk still has to give, from its header. Inside a hunk every line is
+  // content, whatever it looks like: an added line `++ x` reads `+++ x`, like a file header.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const raw of diff.split('\n')) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (raw.startsWith('\\')) continue; // "\ No newline at end of file"
+      if (raw.startsWith('-')) { oldLeft--; continue; }
+      if (!raw.startsWith('+')) oldLeft--; // context
+      newLeft--;
+      files.get(current)?.add(line);
+      line++;
+      continue;
+    }
     if (raw.startsWith('+++ ')) {
       const p = raw.slice(4).replace(/^b\//, '');
       current = p === '/dev/null' ? null : p;
       if (current && !files.has(current)) files.set(current, new Set());
       continue;
     }
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-    if (h) { line = Number(h[1]); continue; }
-    if (!current || raw.startsWith('diff --git') || raw.startsWith('--- ') || raw.startsWith('\\')) continue;
-    if (raw.startsWith('+') || raw.startsWith(' ')) { files.get(current).add(line); line++; }
+    const h = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+    if (h) {
+      oldLeft = h[1] === undefined ? 1 : Number(h[1]);
+      line = Number(h[2]);
+      newLeft = h[3] === undefined ? 1 : Number(h[3]);
+    }
   }
   return files;
 }
