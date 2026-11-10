@@ -30,8 +30,10 @@ export function repoRoot(cwd) {
  * changes. That directory can be anywhere in the repository (`working_directory`).
  */
 const ARTIFACT_DIRS = ['.codex/sessions', '.pi/sessions', '.openclaw'];
-export const HARNESS_ARTIFACTS = ARTIFACT_DIRS.map((d) => new RegExp(`(?:^|/)${d.replace(/\./g, '\\.')}/`));
 const ARTIFACT_PATHSPECS = ARTIFACT_DIRS.map((d) => `:(exclude,glob)**/${d}/**`);
+// (`.openclaw/skills` is one of the repository's skills directories, not OpenClaw's own state)
+const OPENCLAW_SKILLS = ':(glob)**/.openclaw/skills/**';
+export const HARNESS_ARTIFACTS = [/(?:^|\/)\.codex\/sessions\//, /(?:^|\/)\.pi\/sessions\//, /(?:^|\/)\.openclaw\/(?!skills\/)/];
 const isArtifact = (file) => HARNESS_ARTIFACTS.some((re) => re.test(file));
 
 // ---------------------------------------------------------------------------------------------
@@ -61,14 +63,26 @@ function inertConfig(cwd) {
  * never followed (its target may be any file of the runner: the environment of this process,
  * the checkout credentials…), and a directory is a nested repository.
  */
-function isRegularFile(file) {
-  try { return fs.lstatSync(file).isFile(); } catch { return false; }
+function lstat(file) {
+  try { return fs.lstatSync(file); } catch { return null; }
+}
+
+/** The paths among `files` that `.gitattributes` hands to Git LFS (`filter=lfs`). */
+function lfsTracked(run, files) {
+  // `-z`: path NUL attribute NUL value NUL …
+  const out = run(['check-attr', '-z', '--stdin', 'filter'], { input: files.join('\0'), stdio: ['pipe', 'pipe', 'pipe'] }).split('\0');
+  const tracked = [];
+  for (let i = 0; i + 2 < out.length; i += 3) if (out[i + 2] === 'lfs') tracked.push(out[i]);
+  return tracked;
 }
 
 /**
  * What the working tree changes compared with the commit `base` (untracked files included), as
- * { additions: [path], deletions: [path], skipped: [path], any, patch }. `skipped` lists what
- * cannot be committed through the API (symbolic links, nested repositories); it is in the patch.
+ * { additions, deletions, skipped, lfs, executable, any, patch } (lists of paths).
+ *   skipped    — cannot be committed through the API (symbolic links, nested repositories);
+ *   lfs        — tracked by Git LFS: not committed either (see below);
+ *   executable — new files committed without their executable bit.
+ * Everything is in the patch.
  *
  * `base` is the commit the run started from, not the current HEAD: an agent that ran `git commit`
  * leaves a clean tree, and its work would otherwise be lost. The comparison goes through a
@@ -80,23 +94,33 @@ export function treeChanges(cwd, base = 'HEAD') {
   const tmpIndex = path.join(git(['rev-parse', '--git-dir'], cwd).trim(), 'harness-index');
   const env = sanitizedEnv(process.env, { GIT_INDEX_FILE: path.isAbsolute(tmpIndex) ? tmpIndex : path.join(cwd, tmpIndex) });
   const inert = inertConfig(cwd);
-  const run = (args) => git([...inert, ...args], cwd, { env });
+  const run = (args, opts = {}) => git([...inert, ...args], cwd, { env, ...opts });
   try {
     run(['read-tree', base]);
     run(['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS]);
+    if (run(['ls-files', '--others', '--modified', '--deleted', '--exclude-standard', '-z', '--', OPENCLAW_SKILLS])) run(['add', '-A', '--', OPENCLAW_SKILLS]);
     const additions = [];
     const deletions = [];
     const skipped = [];
+    const executable = [];
     // `-z --name-status`: status NUL path NUL …
     const fields = run(['diff', '--cached', '--name-status', '-z', '--no-renames', ...NO_DIFF_PROGRAMS, base]).split('\0');
     for (let i = 0; i + 1 < fields.length; i += 2) {
       const file = fields[i + 1];
       if (isArtifact(file)) continue;
-      if (fields[i] === 'D') deletions.push(file);
-      else (isRegularFile(path.join(cwd, file)) ? additions : skipped).push(file);
+      if (fields[i] === 'D') { deletions.push(file); continue; }
+      const stat = lstat(path.join(cwd, file));
+      if (!stat?.isFile()) { skipped.push(file); continue; }
+      additions.push(file);
+      // (the API creates every new file as 100644)
+      if (fields[i] === 'A' && stat.mode & 0o111) executable.push(file);
     }
-    const any = additions.length + deletions.length + skipped.length > 0;
-    return { additions, deletions, skipped, any, patch: any ? run(['diff', '--cached', '--binary', ...NO_DIFF_PROGRAMS, base]) : '' };
+    // A file tracked by Git LFS must be committed as a pointer, with its content uploaded to the
+    // LFS store. The API would commit the content itself into the repository: left out instead.
+    const lfs = additions.length ? lfsTracked(run, additions) : [];
+    const kept = lfs.length ? additions.filter((f) => !lfs.includes(f)) : additions;
+    const any = kept.length + deletions.length + skipped.length + lfs.length > 0;
+    return { additions: kept, deletions, skipped, lfs, executable: executable.filter((f) => !lfs.includes(f)), any, patch: any ? run(['diff', '--cached', '--binary', ...NO_DIFF_PROGRAMS, base]) : '' };
   } finally {
     fs.rmSync(env.GIT_INDEX_FILE, { force: true });
   }

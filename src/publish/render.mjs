@@ -52,6 +52,8 @@ export function findingsTable(findings, { max = 30, blobUrl } = {}) {
   return `| Severity | Location | Finding |\n|---|---|---|\n${rows.join('\n')}${more}`;
 }
 
+const list = (paths) => paths.map((p) => `\`${p}\``).join(', ');
+
 export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, runUrl, run, status, finalText, progress, branch, findings = [], outsideDiff = [], blobUrl, errorText, review }) {
   const L = [marker];
   if (sticky) L.push(sticky);
@@ -64,6 +66,8 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
     const pr = branch.pullUrl ? ` · [**Pull request #${branch.pullNumber} ➔**](${branch.pullUrl})` : branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : '';
     L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${pr}`);
     if (branch.skipped?.length) L.push('', `> ⚠️ Not committed — symbolic links and nested repositories cannot be committed through the API: ${branch.skipped.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact).`);
+    if (branch.lfs?.length) L.push('', `> ⚠️ Not committed — tracked by Git LFS, which the API cannot write to: ${list(branch.lfs)}. They are in \`changes.patch\` (report artifact).`);
+    if (branch.executable?.length) L.push('', `> ⚠️ Committed without the executable bit (the API creates new files as 100644): ${list(branch.executable)}. Restore it with \`git update-index --chmod=+x\`.`);
     if (branch.leftOut?.length) L.push('', `> ⚠️ Not committed — the job token cannot change workflow files: ${branch.leftOut.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact); a GitHub App token with the *workflows* permission as \`github_token\` can commit them.`);
   }
   if (review) L.push('', `💬 Posted a review with ${review} inline comment${review === 1 ? '' : 's'}.`);

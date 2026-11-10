@@ -172,6 +172,42 @@ test('the commit is retried when GitHub does not answer, without creating it twi
   assert.equal(github.calls.graphql, 3);
 });
 
+test('what the API cannot commit faithfully is left out or flagged: LFS files, the executable bit', async () => {
+  const { repo } = makeRepo();
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+  fs.writeFileSync(path.join(repo, 'old.sh'), '#!/bin/sh\n', { mode: 0o755 });
+  const base = commitAll(repo, 'lfs + a script');
+  fs.writeFileSync(path.join(repo, 'model.bin'), 'not a pointer, the content itself\n');
+  fs.writeFileSync(path.join(repo, 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(repo, 'old.sh'), '#!/bin/sh\necho changed\n'); // an existing file keeps its mode: nothing to flag
+  fs.writeFileSync(path.join(repo, 'notes.txt'), 'n\n');
+  const { branch, github, patch } = await commit(repo, base);
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path).sort(), ['notes.txt', 'old.sh', 'run.sh']);
+  assert.deepEqual(branch.lfs, ['model.bin']);
+  assert.deepEqual(branch.executable, ['run.sh']);
+  assert.match(patch, /model\.bin/); // not lost: it is in the patch
+  const reply = finalBody({ harness: 'pi', model: 'm', runUrl: 'u', status: 'success', finalText: 'ok', branch });
+  assert.match(reply, /Not committed — tracked by Git LFS[^\n]*`model\.bin`/);
+  assert.match(reply, /without the executable bit[^\n]*`run\.sh`/);
+});
+
+test('.openclaw/skills is part of the repository, the rest of .openclaw is harness state', async () => {
+  const { repo, base } = makeRepo();
+  fs.mkdirSync(path.join(repo, '.openclaw', 'skills', 'lint'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.openclaw', 'skills', 'lint', 'SKILL.md'), '---\nname: lint\n---\n');
+  fs.mkdirSync(path.join(repo, '.openclaw', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.openclaw', 'state', 'session.db'), 'state');
+  fs.writeFileSync(path.join(repo, '.openclaw', 'workspace.json'), '{}');
+  const { github, patch } = await commit(repo, base);
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path), ['.openclaw/skills/lint/SKILL.md']);
+  assert.doesNotMatch(patch, /session\.db|workspace\.json/);
+  // … and nothing at all when only the state changed
+  const second = makeRepo();
+  fs.mkdirSync(path.join(second.repo, '.openclaw'));
+  fs.writeFileSync(path.join(second.repo, '.openclaw', 'workspace.json'), '{}');
+  assert.equal((await commit(second.repo, second.base)).branch, null);
+});
+
 test('an unchanged tree commits nothing', async () => {
   const { repo, base } = makeRepo();
   const { branch, github, patch } = await commit(repo, base);
