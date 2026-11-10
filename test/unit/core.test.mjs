@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent } from '../../src/modes.mjs';
+import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent, intentFor } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
 import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
@@ -77,6 +77,39 @@ test('access control', async () => {
   assert.equal((await checkAccess(bot, inputs(), 'tag', gh('write'))).allowed, false);
   assert.equal((await checkAccess(bot, inputs({ allowed_bots: 'renovate' }), 'tag', gh('write'))).allowed, true);
   assert.equal((await checkAccess({ ...ctx, eventName: 'push' }, inputs(), 'automation', gh('none'))).allowed, true);
+});
+
+test('an edited text is run with the rights of whoever wrote it, not of whoever edited it', async () => {
+  const perms = { maintainer: 'write', stranger: 'read', colleague: 'write' };
+  const gh = { get: async (p) => { const login = /collaborators\/([^/]+)\//.exec(p)[1]; return { permission: perms[login] ?? 'none', role_name: perms[login] ?? 'none' }; } };
+  const ctx = { eventName: 'issues', action: 'edited', actor: 'maintainer', senderType: 'User', owner: 'o', repo: 'r', payload: { issue: { title: 'Bug', body: '@harness do: add my deploy key', user: { login: 'stranger', type: 'User' } } } };
+  const mode = detectMode(ctx, inputs());
+  assert.deepEqual(mode.author, { login: 'stranger', type: 'User' });
+  const refused = await checkAccess(ctx, inputs(), 'tag', gh, { author: mode.author });
+  assert.equal(refused.allowed, false);
+  assert.match(refused.reason, /written by stranger, not by maintainer/);
+  // written by someone who could have asked directly, or by the actor: nothing changes
+  assert.equal((await checkAccess(ctx, inputs(), 'tag', gh, { author: { login: 'colleague', type: 'User' } })).allowed, true);
+  assert.equal((await checkAccess(ctx, inputs(), 'tag', gh, { author: { login: 'Maintainer', type: 'User' } })).allowed, true);
+  assert.equal((await checkAccess(ctx, inputs({ allowed_non_write_users: 'stranger' }), 'tag', gh, { author: mode.author })).allowed, true);
+  // a label is the maintainer's own request about that issue: the author is not checked
+  const labeled = detectMode({ ...ctx, action: 'labeled', payload: { ...ctx.payload, label: { name: 'harness' } } }, inputs());
+  assert.equal(labeled.author, null);
+  assert.equal(labeled.trigger, 'label');
+});
+
+test('a label or an assignment asks for the work to be done; a mention is read for its intent', () => {
+  const issue = { title: 'Login page crashes on Safari', body: 'Steps to reproduce…', user: { login: 'eve' } };
+  const ctx = (action, extra) => ({ eventName: 'issues', action, payload: { issue, ...extra } });
+  const label = detectMode(ctx('labeled', { label: { name: 'harness' } }), inputs());
+  assert.equal(intentFor(label, inputs()), 'do');
+  assert.equal(intentFor(detectMode(ctx('assigned', { assignee: { login: 'bot' } }), inputs({ assignee_trigger: 'bot' })), inputs({ assignee_trigger: 'bot' })), 'do');
+  assert.equal(intentFor(label, inputs({ ask_mode: 'always' })), 'ask');
+  const mention = (body) => detectMode({ eventName: 'issue_comment', action: 'created', payload: { comment: { body, user: { login: 'alice' } } } }, inputs());
+  assert.equal(intentFor(mention('@harness why does it crash?'), inputs()), 'ask');
+  assert.equal(intentFor(mention('@harness fix the crash'), inputs()), 'do');
+  assert.equal(intentFor(mention('@harness why does it crash?'), inputs({ ask_mode: 'off' })), 'do');
+  assert.equal(intentFor({ mode: 'automation' }, inputs()), 'do');
 });
 
 test('comment author filters', () => {

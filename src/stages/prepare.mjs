@@ -7,7 +7,7 @@ import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, se
 import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
-import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, classifyIntent } from '../modes.mjs';
+import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, intentFor } from '../modes.mjs';
 import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../harness/index.mjs';
 import { resolveEndpoint } from '../harness/providers.mjs';
 import { installSkills } from '../skills.mjs';
@@ -171,7 +171,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   if (!inputs.model) throw new Error('Input required and not supplied: model (provider/model, e.g. anthropic/claude-sonnet-5-5)');
 
   const github = createClient({ token: inputs.githubToken });
-  const access = await checkAccess(ctx, inputs, modeInfo.mode, github);
+  const access = await checkAccess(ctx, inputs, modeInfo.mode, github, { author: modeInfo.author });
   if (!access.allowed) {
     core.notice(`harness-action: not running — ${access.reason}.`);
     save('context.json', { ...base, run: false, mode: 'skip', reason: access.reason });
@@ -183,8 +183,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const thread0 = sessionThread(inputs, ctx, modeInfo.mode);
   // Tag mode answers questions (read-only, with recommendations) and changes code only when
   // asked to. An explicit `tools` input always wins.
-  let intent = 'do';
-  if (modeInfo.mode === 'tag' && inputs.askMode !== 'off') intent = inputs.askMode === 'always' ? 'ask' : classifyIntent(modeInfo.triggerText, inputs.triggerPhrase);
+  const intent = intentFor(modeInfo, inputs);
   const tools = intent === 'ask' && inputs.tools === 'auto' ? 'read-only' : effectiveTools(inputs.tools, modeInfo.mode);
   const loop = intent === 'ask' && tools === 'read-only' ? { maxIterations: 1, until: '' } : loopSettings(inputs);
   core.info(`Intent: ${intent === 'ask' ? 'answer (read-only, recommendations)' : 'act'} · tools: ${tools}.`);
