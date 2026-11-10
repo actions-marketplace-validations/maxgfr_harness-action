@@ -57,12 +57,41 @@ export function conversationBranch(branch, { defaultBranch = '', baseBranch = ''
   return branch;
 }
 
-async function buildThread({ github, ctx, inputs, isPR, currentCommentId }) {
+const hasMarker = (c) => String(c.body ?? '').includes(TRACKING_MARKER) || String(c.body ?? '').includes('<!-- harness-action:sticky:');
+
+/**
+ * Was this comment written by the action's token? `self` is the login behind a personal token;
+ * a job or app token has none (`null`) and always writes as a bot.
+ */
+export function isOwnComment(comment, self) {
+  const login = comment.user?.login ?? '';
+  return self ? login === self : comment.user?.type === 'Bot' || /\[bot\]$/i.test(login);
+}
+
+/**
+ * The comments of a thread that are the action's own, as a set of ids. The hidden markers are
+ * plain text anyone can paste into a comment: they only count when the author is the token's
+ * identity. Otherwise a stranger's text would be shown to the model as its own earlier reply
+ * (and skip the author filters), or be taken for the sticky comment and overwritten.
+ */
+export function ownComments(github) {
+  let self; // undefined: not asked yet
+  return async (comments) => {
+    const marked = comments.filter(hasMarker);
+    if (!marked.length) return new Set();
+    // (`GET /user` answers for a personal token only; it is refused to job and app tokens)
+    if (self === undefined) self = await github.get('/user').then((u) => u?.login ?? null, () => null);
+    return new Set(marked.filter((c) => isOwnComment(c, self)).map((c) => c.id));
+  };
+}
+
+export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own }) {
   const { owner, repo, number } = ctx;
   const entity = isPR ? await github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? (await github.get(`/repos/${owner}/${repo}/issues/${number}`));
   const comments = await github.paginate(`/repos/${owner}/${repo}/issues/${number}/comments`, { max: 300 });
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
-  const ours = (c) => String(c.body ?? '').includes(TRACKING_MARKER) || String(c.body ?? '').includes('<!-- harness-action:sticky:');
+  const mine = await own(comments);
+  const ours = (c) => mine.has(c.id);
   const keep = (c) => c.user && keepCommentAuthor(c.user.login, inputs) && !ours(c);
   for (const c of comments) {
     if (c.id === currentCommentId) continue;
@@ -136,6 +165,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
   const isPR = ctx.isPR;
 
+  const own = ownComments(github);
+
   // --- tracking comment ----------------------------------------------------------------------
   let trackingCommentId = null;
   const tracking = wantsTrackingComment(ctx, inputs, modeInfo.mode) || (modeInfo.mode === 'automation' && inputs.postComment && ctx.number);
@@ -149,7 +180,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const body = workingBody({ harness: inputs.harness, model: inputs.model, runUrl: ctx.runUrl, sticky });
     try {
       if (sticky) {
-        const existing = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 })).find((c) => c.body?.includes(sticky));
+        const comments = await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 });
+        const mine = await own(comments);
+        const existing = comments.find((c) => c.body?.includes(sticky) && mine.has(c.id));
         if (existing) { await github.patch(`/repos/${ctx.owner}/${ctx.repo}/issues/comments/${existing.id}`, { body }); trackingCommentId = existing.id; }
       }
       if (!trackingCommentId) trackingCommentId = (await github.post(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { body })).id;
@@ -167,7 +200,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     let changedFiles = [];
     let thread = null;
     if (ctx.number && (modeInfo.mode === 'tag' || isPR)) {
-      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId });
+      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId, own });
       thread = t.markdown;
       save('thread.md', thread);
       if (isPR) {
