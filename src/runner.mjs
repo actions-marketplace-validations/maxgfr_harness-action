@@ -79,7 +79,9 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       if (!line.trim().startsWith('{')) return;
       let obj;
       try { obj = JSON.parse(line); } catch { return; }
-      for (const ev of adapter.parse(obj)) emit(ev);
+      let events;
+      try { events = adapter.parse(obj); } catch { return; } // an event of a shape the adapter does not know
+      for (const ev of events) emit(ev);
     });
 
     child.stdout.setEncoding('utf8');
@@ -108,7 +110,10 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       clearTimeout(timer);
       lines.end();
       if (!adapter.streaming) {
-        for (const ev of adapter.parseAll(stdoutAll)) emit(ev);
+        // (a parser that throws here would leave this promise pending for ever)
+        let events;
+        try { events = adapter.parseAll(stdoutAll); } catch (err) { events = [{ t: 'error', message: `cannot read the output of ${adapter.id}: ${err.message}` }]; }
+        for (const ev of events) emit(ev);
         if (limits.budgetUsd && acc.costKnown && acc.cost > limits.budgetUsd && !killedReason) killedReason = `cost $${acc.cost.toFixed(4)} exceeds budget_usd $${limits.budgetUsd}`;
       }
       const exitCode = code ?? (signal ? 128 : 1);

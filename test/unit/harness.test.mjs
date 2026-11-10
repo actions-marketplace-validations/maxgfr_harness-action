@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
+import { createClient } from '../../src/github/api.mjs';
 import { runHarness } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
@@ -150,6 +152,36 @@ test('runner: a harness that exits without reading its stdin is an error, not a 
   assert.equal(result.exitCode, 3);
   const helper = await capture(process.execPath, ['-e', 'process.exit(4)'], { env: process.env, cwd: tmp, stdin: 'x'.repeat(2_000_000) });
   assert.equal(helper.code, 4);
+});
+
+test('openclaw: output that is JSON but not a result document is an error, and the run still ends', async () => {
+  const a = getAdapter('openclaw');
+  for (const out of ['null', '42', '"oops"']) assert.match(a.parseAll(out)[0].message, /printed no result/, out);
+  assert.deepEqual(a.parseAll(''), []);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-openclaw-'));
+  const result = await runHarness({ adapter: a, bin: process.execPath, args: ['-e', 'console.log("null")'], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: () => {} });
+  assert.equal(result.status, 'error');
+});
+
+test('GitHub client: a dropped connection is retried for a read, never for a write', async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.method);
+    // the first request of each method is cut before any answer
+    if (seen.filter((m) => m === req.method).length === 1) return req.socket.destroy();
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1 });
+  try {
+    assert.deepEqual(await github.get('/x'), { ok: true });
+    assert.deepEqual(seen, ['GET', 'GET']);
+    await assert.rejects(github.post('/x', { a: 1 }));
+    assert.deepEqual(seen, ['GET', 'GET', 'POST']); // not sent twice
+  } finally {
+    server.close();
+  }
 });
 
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {

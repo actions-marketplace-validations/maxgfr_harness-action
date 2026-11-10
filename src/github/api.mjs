@@ -7,7 +7,8 @@ export class GitHubError extends Error {
   }
 }
 
-export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com', graphqlUrl = process.env.GITHUB_GRAPHQL_URL } = {}) {
+export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com', graphqlUrl = process.env.GITHUB_GRAPHQL_URL, retryDelayMs = 1000 } = {}) {
+  const backoff = (attempt) => new Promise((r) => setTimeout(r, retryDelayMs * 2 ** attempt));
   const gql = graphqlUrl || `${apiUrl.replace(/\/$/, '')}/graphql`;
   const headers = (extra = {}) => ({
     accept: 'application/vnd.github+json',
@@ -20,13 +21,21 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
   async function request(method, path, body, { accept, raw = false, binary = false, retries = 2 } = {}) {
     const url = path.startsWith('http') ? path : `${apiUrl.replace(/\/$/, '')}${path}`;
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, {
-        method,
-        headers: headers({ ...(accept ? { accept } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }),
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      let res;
+      try {
+        res = await fetch(url, {
+          method,
+          headers: headers({ ...(accept ? { accept } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }),
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        // A dropped connection. Only a read is retried: a write may have reached GitHub.
+        if (method !== 'GET' || attempt >= retries) throw err;
+        await backoff(attempt);
+        continue;
+      }
       if ((res.status >= 500 || res.status === 429) && attempt < retries) {
-        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+        await backoff(attempt);
         continue;
       }
       // (redirects are followed; fetch drops the Authorization header on a cross-origin hop,

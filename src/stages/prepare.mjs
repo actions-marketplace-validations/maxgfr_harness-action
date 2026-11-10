@@ -220,7 +220,11 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
         const p = t.entity;
         pr = { number: p.number, headRef: p.head.ref, headSha: p.head.sha, baseRef: p.base.ref, baseSha: p.base.sha, isFork: p.head.repo?.full_name !== p.base.repo?.full_name, headRepo: p.head.repo?.full_name };
         const [diff, files] = await Promise.all([
-          github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch(() => ''),
+          github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch((err) => {
+            // (GitHub refuses the diff of a very large pull request with a 406)
+            core.warning(`Cannot fetch the diff of #${ctx.number} (${err.message}): get_pr_diff will be empty and review comments will be listed in the reply instead of on the lines.`);
+            return '';
+          }),
           github.paginate(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}/files`, { max: 300 }),
         ]);
         save('pr.diff', diff.length > MAX_DIFF ? diff.slice(0, MAX_DIFF) + '\n…diff truncated…\n' : diff);
