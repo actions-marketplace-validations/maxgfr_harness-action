@@ -22,6 +22,37 @@ function enqueue(kind, payload) {
   fs.appendFileSync(outbox(), JSON.stringify({ kind, at: new Date().toISOString(), ...payload }) + '\n');
 }
 
+/** What one tool result may hold: about 50,000 tokens. A whole large diff does not fit a context window. */
+const DIFF_LIMIT = 200_000;
+
+/** A unified diff as [{ file, text }], one entry per `diff --git` section. */
+function diffSections(diff) {
+  const sections = [];
+  for (const text of diff.split(/^(?=diff --git )/m)) {
+    if (!text.startsWith('diff --git ')) continue;
+    const name = /^\+\+\+ b\/(.+)$/m.exec(text)?.[1] ?? /^--- a\/(.+)$/m.exec(text)?.[1] ?? /^diff --git a\/(.+?) b\//.exec(text)?.[1] ?? '?';
+    sections.push({ file: name.trim(), text });
+  }
+  return sections;
+}
+
+/**
+ * The pull request diff as a tool result: whole when it fits, the diff of one file when `path` is
+ * given, and otherwise the list of changed files to choose from.
+ */
+export function prDiff(diff, { path: file, limit = DIFF_LIMIT } = {}) {
+  const clip = (text) => (text.length > limit ? `${text.slice(0, limit)}\n… truncated: ${text.length - limit} more characters. Read the file itself for the rest.\n` : text);
+  const sections = diffSections(diff);
+  const listing = () => sections.map((s) => `- ${s.file} (${s.text.length} characters)`).join('\n');
+  if (file) {
+    const wanted = String(file).replace(/^\.\//, '');
+    const hits = sections.filter((s) => s.file === wanted);
+    return hits.length ? clip(hits.map((s) => s.text).join('')) : `"${wanted}" is not in the diff. Changed files:\n${listing()}`;
+  }
+  if (diff.length <= limit) return diff;
+  return `The diff is ${diff.length} characters, too large to return at once. It changes ${sections.length} file(s):\n${listing()}\n\nCall get_pr_diff again with \`path\` set to the file you want.`;
+}
+
 const str = (description) => ({ type: 'string', description });
 const int = (description) => ({ type: 'integer', description });
 
@@ -64,9 +95,9 @@ export function toolDefinitions(cfg) {
     tools.push(
       {
         name: 'get_pr_diff',
-        description: 'Return the unified diff of the pull request (base...head).',
-        inputSchema: { type: 'object', properties: {} },
-        run: () => readText('pr.diff') ?? 'The diff is not available.',
+        description: 'Return the unified diff of the pull request (base...head). A large diff comes back as the list of changed files: call again with `path` to get the diff of one file.',
+        inputSchema: { type: 'object', properties: { path: str('Optional: only the diff of this file (path relative to the repository root)') } },
+        run: ({ path: file } = {}) => { const diff = readText('pr.diff'); return diff === null ? 'The diff is not available.' : prDiff(diff, { path: file }); },
       },
       {
         name: 'add_inline_comment',

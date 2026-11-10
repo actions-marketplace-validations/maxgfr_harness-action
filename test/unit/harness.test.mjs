@@ -222,7 +222,8 @@ test('GitHub client: a long list gives its newest items when its length is known
     res.end(JSON.stringify(items));
   });
   const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
-  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1, timeoutMs: 150 });
+  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1 });
+  const impatient = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1, timeoutMs: 100 });
   try {
     const newest = await github.paginate('/comments', { max: 200, total: 730 });
     assert.deepEqual([newest.length, newest[0].id, newest.at(-1).id], [200, 530, 729]);
@@ -232,7 +233,7 @@ test('GitHub client: a long list gives its newest items when its length is known
     assert.deepEqual([oldest.length, oldest[0].id, oldest.at(-1).id], [200, 0, 199]);
     assert.deepEqual(pages, [1, 2]);
     assert.equal((await github.paginate('/comments', { max: 1000, total: 730 })).length, 730); // everything fits
-    await assert.rejects(github.post('/stall', { a: 1 }), /timeout|aborted/i);
+    await assert.rejects(impatient.post('/stall', { a: 1 }), /timeout|aborted/i);
   } finally {
     server.closeAllConnections();
     server.close();

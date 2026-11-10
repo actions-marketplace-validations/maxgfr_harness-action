@@ -15,6 +15,7 @@ import { commentableLines } from '../../src/git.mjs';
 import { branchNameFor, splitWorkflowChanges, splitInlineComments } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
+import { prDiff } from '../../src/mcp/server.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -371,6 +372,21 @@ test('MCP server: newline and Content-Length framing, outbox, structured output'
   const header = await mcpSession(dir, 'header', msgs.slice(0, 1));
   assert.match(header, /^Content-Length: \d+\r\n\r\n\{/);
   assert.equal(collect(dir).findings.length, 1);
+});
+
+test('get_pr_diff: whole when it fits, one file on request, a file list when it is too large', () => {
+  const section = (file, body) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1,2 @@\n a\n+${body}\n`;
+  const diff = section('src/a.js', 'x') + section('docs/b.md', 'y'.repeat(500)) + 'diff --git a/gone.txt b/gone.txt\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-z\n';
+  assert.equal(prDiff(diff), diff);
+  assert.equal(prDiff(diff, { path: './src/a.js' }), section('src/a.js', 'x'));
+  assert.match(prDiff(diff, { path: 'gone.txt' }), /^diff --git a\/gone\.txt/);
+  assert.match(prDiff(diff, { path: 'nope.js' }), /"nope\.js" is not in the diff[\s\S]*- src\/a\.js \(\d+ characters\)[\s\S]*- gone\.txt/);
+  // too large for one result: the files to choose from, never megabytes of text
+  const listing = prDiff(diff, { limit: 300 });
+  assert.match(listing, /too large to return at once\. It changes 3 file\(s\):\n- src\/a\.js/);
+  assert.ok(listing.length < 400);
+  // one file that is itself too large is clipped, and says so
+  assert.match(prDiff(diff, { path: 'docs/b.md', limit: 300 }), /truncated: \d+ more characters/);
 });
 
 test('MCP server: an invalid structured output is refused with the reason, so the agent can correct it', async () => {
