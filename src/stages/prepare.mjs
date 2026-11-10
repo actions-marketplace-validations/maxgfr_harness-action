@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as core from '../core/action.mjs';
-import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
+import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionArtifactName } from '../inputs.mjs';
 import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
@@ -248,14 +248,16 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       }
     }
 
-    // --- conversation: restored here from an artifact, or by the cache step that follows ---------
+    // --- conversation: restored here from an artifact, or just before this step from the cache --
+    // (the cache store: `resolve` emptied the directory and a step of action.yml filled it)
     const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
+    const alreadyRestored = Boolean(env.HARNESS_SESSION_KEEP) || inputs.sessionStore === 'cache';
     let savedBranch = '';
     if (thread0) {
-      if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
+      if (!alreadyRestored) fs.rmSync(sessionDir, { recursive: true, force: true });
       fs.mkdirSync(sessionDir, { recursive: true });
       core.info(`Conversation: ${thread0}.`);
-      if (inputs.sessionStore === 'artifact' && !env.HARNESS_SESSION_KEEP) {
+      if (!alreadyRestored) {
         const r = await restoreSessionArtifact({ github, owner: ctx.owner, repo: ctx.repo, name: sessionArtifactName(adapterId, thread0), dir: sessionDir, tmpDir: stateDir })
           .catch((err) => ({ restored: false, reason: `could not restore it: ${err.message}` }));
         if (r.restored || /no saved/.test(r.reason)) core.info(`Saved conversation: ${r.reason}.`);
@@ -420,8 +422,6 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     return {
       run: true,
       mode: modeInfo.mode,
-      sessionDir: thread0 ? sessionDir : '',
-      sessionRestorePrefix: thread0 && inputs.sessionStore === 'cache' ? sessionCachePrefix(adapterId, thread0) : '',
     };
   } catch (err) {
     // The tracking comment must not stay "working…" forever.

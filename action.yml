@@ -298,6 +298,18 @@ runs:
         path: ${{ steps.resolve.outputs.cache_path }}
         key: ${{ steps.resolve.outputs.cache_key }}
 
+    # session_store: cache — the conversation of this issue / PR (latest save wins). Before
+    # Prepare, which reads the branch of the conversation from it. (The default store, artifact,
+    # is restored by Prepare itself.)
+    - name: Restore the conversation
+      if: steps.resolve.outputs.session_restore_prefix != ''
+      continue-on-error: true
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.resolve.outputs.session_dir }}
+        key: ${{ steps.resolve.outputs.session_restore_prefix }}none
+        restore-keys: ${{ steps.resolve.outputs.session_restore_prefix }}
+
     # Holds the GitHub token: decides whether to run, gathers the context, installs the harness
     # and the skills, posts the tracking comment, then removes persisted git credentials.
     - name: Prepare
@@ -307,17 +319,8 @@ runs:
         HARNESS_INPUTS: ${{ toJSON(inputs) }}
         HARNESS_STATE_DIR: ${{ steps.resolve.outputs.state_dir }}
         HARNESS_TOOLS_DIR: ${{ steps.resolve.outputs.tools_dir }}
+        HARNESS_SESSION_DIR: ${{ steps.resolve.outputs.session_dir }}
       run: node "$GITHUB_ACTION_PATH/src/cli.mjs" prepare
-
-    # The conversation of this issue / PR (latest save wins).
-    - name: Restore the conversation
-      if: steps.prepare.outputs.run == 'true' && steps.prepare.outputs.session_restore_prefix != ''
-      continue-on-error: true
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ steps.prepare.outputs.session_dir }}
-        key: ${{ steps.prepare.outputs.session_restore_prefix }}none
-        restore-keys: ${{ steps.prepare.outputs.session_restore_prefix }}
 
     # NO token here: the agent runs from the token-free plan written by Prepare.
     - name: Run the agent

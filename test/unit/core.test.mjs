@@ -267,8 +267,9 @@ test('mock LLM resolves steps against each harness tool shape', () => {
 });
 
 /** Runs `node src/cli.mjs resolve` like the first step of action.yml and returns its outputs. */
-function runResolve(inputs, { eventName, event }) {
+function runResolve(inputs, { eventName, event }, { before = () => {} } = {}) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-resolve-')));
+  before(tmp);
   fs.writeFileSync(path.join(tmp, 'event.json'), JSON.stringify(event));
   const outputFile = path.join(tmp, 'output.txt');
   fs.writeFileSync(outputFile, '');
@@ -287,6 +288,21 @@ test('resolve says when the event will be skipped, before anything is restored f
   assert.equal(runResolve({}, comment('@harness fix it')).outputs.skip, 'false');
   assert.equal(runResolve({ prompt: 'triage this' }, comment('thanks!')).outputs.skip, 'false');
   assert.equal(runResolve({}, { eventName: 'push', event: {} }).outputs.skip, 'true');
+});
+
+test('resolve names the cached conversation, so that it is restored before prepare reads its branch', () => {
+  const mention = { eventName: 'issue_comment', event: { action: 'created', issue: { number: 7, title: 't' }, comment: { id: 1, body: '@harness do the second option' } } };
+  // a directory left by an earlier use of the action in the same job must not be taken for the restored one
+  const stale = (tmp) => { fs.mkdirSync(path.join(tmp, 'harness-action-session')); fs.writeFileSync(path.join(tmp, 'harness-action-session', 'meta.json'), '{"branch":"harness/stale"}'); };
+  const cache = runResolve({ session_store: 'cache', harness: 'pi' }, mention, { before: stale });
+  assert.equal(cache.outputs.session_restore_prefix, 'harness-session-v1-pi-issue-7-');
+  assert.equal(cache.outputs.session_dir, path.join(cache.tmp, 'harness-action-session'));
+  assert.deepEqual(fs.readdirSync(cache.outputs.session_dir), []);
+  // the artifact store is restored by prepare itself; no conversation → nothing to restore
+  assert.equal(runResolve({ harness: 'pi' }, mention).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache', session: 'off' }, mention).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache' }, { eventName: 'push', event: {} }).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache', session_key: 'my chat', prompt: 'hi' }, { eventName: 'push', event: {} }).outputs.session_restore_prefix, 'harness-session-v1-opencode-my-chat-');
 });
 
 function mcpSession(stateDir, framing, messages) {
