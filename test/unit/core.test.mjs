@@ -91,6 +91,16 @@ test('json schema validation', () => {
   assert.deepEqual(validate(schema, { ok: true, items: ['a'] }), []);
   assert.equal(validate(schema, { ok: 1, items: ['c'], x: 1 }).length, 3);
   assert.match(validate(schema, {}).join(), /missing required property "ok"/);
+  // a pattern that is not a valid regular expression is reported, it does not throw
+  assert.deepEqual(validate({ type: 'string', pattern: '^[a-z]+$' }, 'abc'), []);
+  assert.match(validate({ type: 'string', pattern: '(unclosed' }, 'abc').join(), /not a valid regular expression/);
+});
+
+test('findings: an end line needs a start line', () => {
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', end_line: null }).endLine, undefined);
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', end_line: 9 }).endLine, undefined);
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', line: 4, end_line: 2 }).endLine, undefined);
+  assert.deepEqual([normalizeFinding({ file: 'a', message: 'm', line: 4, end_line: '9' })].map((f) => [f.line, f.endLine]), [[4, 9]]);
 });
 
 test('findings: normalisation, gate, SARIF, table', () => {
