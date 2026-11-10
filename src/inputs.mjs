@@ -16,6 +16,12 @@ function parseJsonInput(name, raw, files = true) {
   try { return JSON.parse(text); } catch (err) { throw new Error(`Input ${name} is not valid JSON: ${err.message}`); }
 }
 
+/** Inline TOML, or the path of a `.toml` file (one line, no `=`): its content. */
+function readTomlInput(raw, files = true) {
+  const isPath = /\.toml$/i.test(raw) && !/[\n=]/.test(raw);
+  return isPath && files ? fs.readFileSync(raw, 'utf8') : raw;
+}
+
 function positiveNumber(name, raw, dflt) {
   if (!raw) return dflt;
   const n = Number(raw);
@@ -52,7 +58,7 @@ export function readInputs(env = process.env, { files = true } = {}) {
     harnessConfig: harnessConfigRaw
       ? isInlineJson(harnessConfigRaw) || /\.json$/i.test(harnessConfigRaw)
         ? parseJsonInput('harness_config', harnessConfigRaw, files)
-        : harnessConfigRaw // TOML for codex, kept verbatim
+        : readTomlInput(harnessConfigRaw, files) // TOML for codex, kept verbatim
       : null,
     mcpConfig: parseJsonInput('mcp_config', getInput('mcp_config', o), files),
     skills: getList('skills', o),

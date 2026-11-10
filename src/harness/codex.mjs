@@ -33,6 +33,23 @@ export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig,
   return isPlainObject(harnessConfig) ? deepMerge(cfg, harnessConfig) : cfg;
 }
 
+const TABLE_HEADER = /^[ \t]*\[\[?[^[\]\n]+\]\]?[ \t]*(?:#[^\n]*)?$/m;
+
+/**
+ * `harness_config` given as TOML, merged with the generated configuration without a TOML parser.
+ * In TOML a key belongs to the last table header above it, so the user's top-level keys must come
+ * before the first generated table: appended at the end they would silently become keys of
+ * `[projects."<dir>"]`. They win over a generated key of the same name; the user's tables go last.
+ */
+export function withUserToml(generated, user) {
+  const split = (text) => { const m = TABLE_HEADER.exec(text); const i = m ? m.index : text.length; return [text.slice(0, i).trim(), text.slice(i).trim()]; };
+  const [head, tables] = split(generated);
+  const [userHead, userTables] = split(user);
+  const overridden = new Set([...userHead.matchAll(/^[ \t]*([A-Za-z0-9_-]+)[ \t]*=/gm)].map((m) => m[1]));
+  const kept = head.split('\n').filter((line) => !overridden.has(/^([A-Za-z0-9_-]+) = /.exec(line)?.[1])).join('\n');
+  return `${[kept, userHead, tables, userTables].filter(Boolean).join('\n\n')}\n`;
+}
+
 export default {
   id: 'codex',
   streaming: true,
@@ -41,7 +58,7 @@ export default {
   prepare(opts) {
     const cfg = buildConfig(opts);
     let toml = toToml(cfg, { inline: [/^mcp_servers\.[^.]+\.(env|http_headers)$/] });
-    if (typeof opts.harnessConfig === 'string') toml += `\n${opts.harnessConfig}\n`;
+    if (typeof opts.harnessConfig === 'string') toml = withUserToml(toml, opts.harnessConfig);
     const codexHome = path.join(opts.stateDir, 'codex-home');
     fs.mkdirSync(codexHome, { recursive: true });
     fs.writeFileSync(path.join(codexHome, 'config.toml'), toml);

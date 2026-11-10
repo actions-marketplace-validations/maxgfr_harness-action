@@ -10,7 +10,8 @@ import { capture } from '../../src/harness/exec.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
-import { buildConfig as codexConfig } from '../../src/harness/codex.mjs';
+import { buildConfig as codexConfig, withUserToml } from '../../src/harness/codex.mjs';
+import { readInputs } from '../../src/inputs.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
@@ -91,6 +92,29 @@ test('codex config: sandbox, providers, MCP auto-approval', () => {
   const openai = codexConfig({ ...base, model: { provider: 'openai', id: 'gpt-5.1' }, endpoint: resolveEndpoint({ provider: 'openai' }) });
   assert.equal(openai.model_provider, undefined);
   assert.throws(() => codexConfig({ ...base, model: { provider: 'anthropic', id: 'x' }, endpoint: resolveEndpoint({ provider: 'anthropic' }) }), /OpenAI-compatible/);
+});
+
+test('codex: TOML harness_config keeps its top-level keys at the top level', () => {
+  const base = { model: { provider: 'openai', id: 'gpt-5.1' }, endpoint: resolveEndpoint({ provider: 'openai' }), perms: permissionProfile('edit'), mcpServers: { harness: { command: 'node', args: ['s'] } }, workDir: '/w' };
+  const generated = toToml(codexConfig(base), { inline: [/^mcp_servers\.[^.]+\.(env|http_headers)$/] });
+  const user = 'model_reasoning_effort = "high"\nmodel = "gpt-5.1-codex" # mine\n\n[profiles.ci]\napproval_policy = "never"\n';
+  const merged = withUserToml(generated, user);
+  const firstTable = merged.search(/^\[/m);
+  assert.ok(merged.indexOf('model_reasoning_effort = "high"') < firstTable, merged); // not inside [projects."/w"]
+  assert.deepEqual(merged.match(/^model = .*$/gm), ['model = "gpt-5.1-codex" # mine']); // the user's value, once
+  assert.match(merged, /^approval_policy = "never"$/m); // generated keys the user did not set stay
+  assert.ok(merged.indexOf('[profiles.ci]') > merged.indexOf('[projects."/w"]'));
+  assert.equal(merged.match(/^approval_policy/gm).length, 2); // top level + the user's profile
+  // tables only, or keys only
+  assert.ok(withUserToml(generated, '[profiles.ci]\na = 1\n').startsWith('model = "gpt-5.1"'));
+  assert.ok(withUserToml(generated, 'x = [\n  1,\n]\n').indexOf('x = [') < withUserToml(generated, 'x = [\n  1,\n]\n').search(/^\[/m));
+
+  // a .toml path is read, like a .json path is
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-toml-')), 'codex.toml');
+  fs.writeFileSync(file, user);
+  const read = (over) => readInputs({ INPUT_MODEL: 'a/b', INPUT_HARNESS_CONFIG: over }).harnessConfig;
+  assert.equal(read(file), user);
+  assert.equal(read('a = "b.toml"'), 'a = "b.toml"'); // inline TOML is kept as it is
 });
 
 test('pi tool list keeps MCP tools', () => {
