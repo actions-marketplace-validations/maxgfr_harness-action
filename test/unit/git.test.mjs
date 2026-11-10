@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readInputs } from '../../src/inputs.mjs';
 import { commitChanges } from '../../src/stages/publish.mjs';
+import { finalBody } from '../../src/publish/render.mjs';
 
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
 
@@ -88,6 +89,29 @@ test('work the agent committed locally is still published, on top of the commit 
   assert.deepEqual(fileChanges.deletions, [{ path: 'README.md' }]);
   assert.equal(expectedHeadOid, base);
   assert.match(patch, /committed by the agent/);
+});
+
+test('a symbolic link is never followed: its target is not read, the link is reported', async () => {
+  const { tmp, repo, base } = makeRepo();
+  fs.writeFileSync(path.join(tmp, 'outside-secret.txt'), 'TOKEN=ghs_not_for_the_branch\n');
+  fs.symlinkSync(path.join(tmp, 'outside-secret.txt'), path.join(repo, 'leak.txt'));
+  fs.rmSync(path.join(repo, 'README.md'));
+  fs.symlinkSync(path.join(tmp, 'outside-secret.txt'), path.join(repo, 'README.md')); // a tracked file turned into a link
+  fs.writeFileSync(path.join(repo, 'real.txt'), 'real\n');
+  const { branch, github } = await commit(repo, base);
+  const { additions } = github.calls.commits[0].fileChanges;
+  assert.deepEqual(additions.map((a) => a.path), ['real.txt']);
+  assert.ok(!additions.some((a) => decode(a).includes('ghs_not_for_the_branch')));
+  assert.deepEqual(branch.skipped.sort(), ['README.md', 'leak.txt']);
+  assert.match(finalBody({ harness: 'pi', model: 'm', runUrl: 'u', status: 'success', finalText: 'ok', branch }), /Not committed[^\n]*`leak\.txt`/);
+
+  // only links: nothing to commit, no empty branch
+  const second = makeRepo();
+  fs.symlinkSync('/etc/hosts', path.join(second.repo, 'hosts'));
+  const only = await commit(second.repo, second.base);
+  assert.equal(only.branch, null);
+  assert.equal(only.github.calls.refs.length, 0);
+  assert.match(only.patch, /hosts/);
 });
 
 test('an unchanged tree commits nothing', async () => {

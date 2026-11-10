@@ -34,8 +34,18 @@ const ARTIFACT_PATHSPECS = ARTIFACT_DIRS.map((d) => `:(exclude,glob)**/${d}/**`)
 const isArtifact = (file) => HARNESS_ARTIFACTS.some((re) => re.test(file));
 
 /**
+ * Only regular files can be committed: the API takes a path and its contents. A symbolic link is
+ * never followed (its target may be any file of the runner: the environment of this process,
+ * the checkout credentials…), and a directory is a nested repository.
+ */
+function isRegularFile(file) {
+  try { return fs.lstatSync(file).isFile(); } catch { return false; }
+}
+
+/**
  * What the working tree changes compared with the commit `base` (untracked files included), as
- * { additions: [path], deletions: [path], any, patch }.
+ * { additions: [path], deletions: [path], skipped: [path], any, patch }. `skipped` lists what
+ * cannot be committed through the API (symbolic links, nested repositories); it is in the patch.
  *
  * `base` is the commit the run started from, not the current HEAD: an agent that ran `git commit`
  * leaves a clean tree, and its work would otherwise be lost. The comparison goes through a
@@ -51,15 +61,17 @@ export function treeChanges(cwd, base = 'HEAD') {
     git(['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], cwd, { env });
     const additions = [];
     const deletions = [];
+    const skipped = [];
     // `-z --name-status`: status NUL path NUL …
     const fields = git(['diff', '--cached', '--name-status', '-z', '--no-renames', base], cwd, { env }).split('\0');
     for (let i = 0; i + 1 < fields.length; i += 2) {
       const file = fields[i + 1];
       if (isArtifact(file)) continue;
-      (fields[i] === 'D' ? deletions : additions).push(file);
+      if (fields[i] === 'D') deletions.push(file);
+      else (isRegularFile(path.join(cwd, file)) ? additions : skipped).push(file);
     }
-    const any = additions.length + deletions.length > 0;
-    return { additions, deletions, any, patch: any ? git(['diff', '--cached', '--binary', base], cwd, { env }) : '' };
+    const any = additions.length + deletions.length + skipped.length > 0;
+    return { additions, deletions, skipped, any, patch: any ? git(['diff', '--cached', '--binary', base], cwd, { env }) : '' };
   } finally {
     fs.rmSync(env.GIT_INDEX_FILE, { force: true });
   }
