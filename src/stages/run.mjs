@@ -28,6 +28,17 @@ export function argvPrompt(file) {
 }
 export const TURN_MARKER = '<!-- harness-turn -->';
 
+/**
+ * `max_steps`, `timeout_minutes` and `budget_usd` cover the whole loop. Which one is used up, as
+ * { status, reason }, or null when another turn may start.
+ */
+export function spentLimit(limits, { elapsedMin, tools, cost }) {
+  if (elapsedMin >= limits.timeoutMinutes) return { status: 'timeout', reason: `timeout after ${limits.timeoutMinutes} min (timeout_minutes)` };
+  if (tools >= limits.maxSteps) return { status: 'max_steps', reason: `${tools} tool calls used (max_steps ${limits.maxSteps})` };
+  if (limits.budgetUsd && cost >= limits.budgetUsd) return { status: 'budget', reason: `cost $${cost.toFixed(4)} reached budget_usd $${limits.budgetUsd}` };
+  return null;
+}
+
 /** A harness session / thread id as the four harnesses write them (`ses_…`, a UUID). */
 export const isSessionId = (id) => typeof id === 'string' && /^[A-Za-z0-9][\w.-]{0,127}$/.test(id);
 
@@ -124,6 +135,14 @@ export async function run({ stateDir, env = process.env }) {
   try {
     for (let i = 1; i <= loop.maxIterations; i++) {
       const elapsedMin = (Date.now() - started) / 60_000;
+      // The limits cover the whole loop: once one is spent, another turn is not started.
+      const spent = i > 1 ? spentLimit(plan.limits, { elapsedMin, tools: total.tools, cost: total.cost }) : null;
+      if (spent) {
+        core.info(`⛔ not starting iteration ${i}: ${spent.reason}`);
+        last = { ...last, status: spent.status, killedReason: spent.reason };
+        loopResult = 'stopped';
+        break;
+      }
       const limits = {
         maxSteps: Math.max(1, plan.limits.maxSteps - total.tools),
         timeoutMinutes: Math.max(0.5, plan.limits.timeoutMinutes - elapsedMin),

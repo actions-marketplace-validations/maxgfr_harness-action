@@ -11,7 +11,7 @@ import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
 import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
-import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt } from '../../src/stages/run.mjs';
+import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt, spentLimit } from '../../src/stages/run.mjs';
 import { previousReply, conversationBranch, buildThread, ownComments, commentLister, prCheckout } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
 import { loopLine, finalBody, findingsTable } from '../../src/publish/render.mjs';
@@ -61,6 +61,15 @@ test('loop settings', () => {
   assert.deepEqual(loopSettings(inputs()), { maxIterations: 1, until: '' });
   assert.deepEqual(loopSettings(inputs({ loop_until: 'npm test' })), { maxIterations: 5, until: 'npm test' });
   assert.deepEqual(loopSettings(inputs({ max_iterations: '3' })), { maxIterations: 3, until: '' });
+});
+
+test('a loop does not start another turn once a limit is spent', () => {
+  const limits = { maxSteps: 200, timeoutMinutes: 30, budgetUsd: 1 };
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 40, cost: 0.2 }), null);
+  assert.equal(spentLimit(limits, { elapsedMin: 30.1, tools: 40, cost: 0.2 }).status, 'timeout');
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 200, cost: 0.2 }).status, 'max_steps');
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 40, cost: 1 }).status, 'budget');
+  assert.equal(spentLimit({ ...limits, budgetUsd: 0 }, { elapsedMin: 12, tools: 40, cost: 5 }), null); // no budget set
 });
 
 test('conversation key', () => {

@@ -209,8 +209,14 @@ export async function publish({ env = process.env, stateDir }) {
   if (!run) errors.push('The harness did not run (the run step failed before writing its result).');
   else if (status !== 'success') errors.push(run.killedReason || run.errors?.at(-1) || `${inputs.harness} ${status}`);
   // loop mode: the completion check must have passed
-  const loopFailed = Boolean(run && status === 'success' && run.loopUntil && run.loopResult !== 'passed');
-  if (loopFailed) errors.push(`The completion check \`${run.loopUntil}\` still fails after ${run.iterations?.length ?? 0} iteration(s) (max_iterations).`);
+  // loop mode: done means the completion check passed or, without one, that the agent declared
+  // the task complete. Running out of iterations is not done.
+  const loopFailed = Boolean(run && status === 'success' && (run.loopUntil ? run.loopResult !== 'passed' : run.loopResult === 'exhausted'));
+  if (loopFailed) {
+    errors.push(run.loopUntil
+      ? `The completion check \`${run.loopUntil}\` still fails after ${run.iterations?.length ?? 0} iteration(s) (max_iterations).`
+      : `The agent did not call task_complete within ${run.iterations?.length ?? 0} iteration(s) (max_iterations): the task is not declared done.`);
+  }
 
   // structured output
   let structuredErrors = [];
@@ -325,7 +331,8 @@ export async function publish({ env = process.env, stateDir }) {
   }));
 
   // outputs
-  const agentFailed = status !== 'success' || structuredErrors.length > 0 || loopFailed;
+  // (changes that could not be committed are a failed run too: they reached nobody)
+  const agentFailed = status !== 'success' || structuredErrors.length > 0 || loopFailed || Boolean(commitError);
   set('conclusion', agentFailed ? 'failure' : 'success');
   set('pr_number', pull ? String(pull.number) : '');
   set('pr_url', pull?.url ?? '');

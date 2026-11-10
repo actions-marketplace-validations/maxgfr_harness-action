@@ -3,36 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { readInputs } from '../../src/inputs.mjs';
 import { commitChanges } from '../../src/stages/publish.mjs';
 import { finalBody } from '../../src/publish/render.mjs';
-
-const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
-
-const IDENTITY = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
-const g = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...IDENTITY } }).trim();
-
-/** Commits the whole working tree with plumbing only (no hook and no signing involved). */
-function commitAll(cwd, message) {
-  g(cwd, 'add', '-A');
-  let parent = '';
-  try { parent = g(cwd, 'rev-parse', '--verify', '-q', 'HEAD'); } catch {}
-  const sha = g(cwd, 'commit-tree', g(cwd, 'write-tree'), ...(parent ? ['-p', parent] : []), '-m', message);
-  g(cwd, 'update-ref', 'HEAD', sha);
-  return sha;
-}
-
-/** A repository with one commit: README.md and packages/app/a.txt. */
-function makeRepo() {
-  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-git-')));
-  const repo = path.join(tmp, 'repo');
-  fs.mkdirSync(path.join(repo, 'packages', 'app'), { recursive: true });
-  g(repo, 'init', '-q', '-b', 'main');
-  fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n');
-  fs.writeFileSync(path.join(repo, 'packages', 'app', 'a.txt'), 'a\n');
-  return { tmp, repo, base: commitAll(repo, 'init') };
-}
+import { inputs, g, commitAll, makeRepo, runPublish } from './helpers.mjs';
 
 /** The GitHub client `commitChanges` needs, recording what it is asked to do. */
 function fakeGitHub({ onRef = () => {} } = {}) {
