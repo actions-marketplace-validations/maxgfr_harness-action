@@ -12,6 +12,17 @@ import { truncate } from '../util.mjs';
 
 const readJson = (f, d = null) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
 
+/** The normalised events of the run. A line cut short (a cancelled run) is skipped, not fatal. */
+export function readEvents(file) {
+  if (!fs.existsSync(file)) return [];
+  const events = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line) continue;
+    try { events.push(JSON.parse(line)); } catch {}
+  }
+  return events;
+}
+
 export function branchNameFor({ template, prefix, ctx, now = new Date() }) {
   const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
   const kind = ctx.isPR ? 'pr' : ctx.number ? 'issue' : 'run';
@@ -289,9 +300,6 @@ export async function publish({ env = process.env, stateDir }) {
   }
 
   // job summary
-  const events = fs.existsSync(path.join(reportDir, 'execution.jsonl'))
-    ? fs.readFileSync(path.join(reportDir, 'execution.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
-    : [];
   core.summary(summaryMarkdown({
     harness: inputs.harness,
     version: context.version,
@@ -303,7 +311,8 @@ export async function publish({ env = process.env, stateDir }) {
     findings,
     branch,
     structured,
-    transcript: inputs.displayReport ? transcriptMarkdown(events) : '',
+    // (the log is only read for display_report: it can be tens of megabytes)
+    transcript: inputs.displayReport ? transcriptMarkdown(readEvents(path.join(reportDir, 'execution.jsonl'))) : '',
     errorText,
     blobUrl,
   }));

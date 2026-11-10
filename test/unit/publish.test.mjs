@@ -41,6 +41,17 @@ async function runPublish({ context = {}, run = {}, inputs = {}, files = {} } = 
   }
 }
 
+test('a truncated execution log does not stop the publish step', async () => {
+  const log = `${JSON.stringify({ t: 'text', text: 'TRANSCRIPT_LINE' })}\n${JSON.stringify({ t: 'tool', name: 'read', input: {} })}\n{"t":"text","text":"cut sho`;
+  const shown = await runPublish({ inputs: { display_report: 'true' }, files: { 'report/execution.jsonl': log } });
+  assert.equal(shown.outputs.conclusion, 'success');
+  assert.match(shown.summary, /TRANSCRIPT_LINE/);
+  // without display_report the log is not even read
+  const hidden = await runPublish({ files: { 'report/execution.jsonl': log } });
+  assert.equal(hidden.outputs.conclusion, 'success');
+  assert.doesNotMatch(hidden.summary, /TRANSCRIPT_LINE/);
+});
+
 test('the structured output is checked against the schema prepare parsed, not the file as the agent left it', async () => {
   const work = tmpDir('schema');
   const schemaFile = path.join(work, 'schema.json');
