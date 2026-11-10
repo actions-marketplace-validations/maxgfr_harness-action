@@ -60,6 +60,13 @@ export function parseFrontmatter(text) {
   return out;
 }
 
+/**
+ * A skill is installed in a directory named after it. The name comes from the SKILL.md of a
+ * repository we do not control, so it must be one path segment: `../../x` would otherwise make
+ * the install delete and overwrite a directory outside the skills folder.
+ */
+const isPathSegment = (name) => typeof name === 'string' && name !== '' && name !== '.' && name !== '..' && !/[\\/\0]/.test(name);
+
 export function discoverSkills(root, { maxDepth = 6 } = {}) {
   const found = [];
   const walk = (dir, depth) => {
@@ -67,7 +74,7 @@ export function discoverSkills(root, { maxDepth = 6 } = {}) {
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
       const meta = parseFrontmatter(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'));
-      found.push({ name: meta.name || path.basename(dir), description: meta.description || '', dir });
+      found.push({ name: isPathSegment(meta.name) ? meta.name : path.basename(dir), description: meta.description || '', dir });
       return; // a skill's own sub-folders are its resources, not more skills
     }
     if (depth >= maxDepth) return;

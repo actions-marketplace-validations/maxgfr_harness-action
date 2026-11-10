@@ -154,6 +154,28 @@ test('skills are installed into the isolated home, repository skills included', 
   for (const base of ['.agents/skills']) assert.ok(fs.existsSync(path.join(tmp, 'home', base, 'echo-check', 'SKILL.md')));
 });
 
+test('a skill name cannot escape the skills directory', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-skill-name-'));
+  const victim = path.join(tmp, 'victim');
+  fs.mkdirSync(victim);
+  fs.writeFileSync(path.join(victim, 'keep.txt'), 'keep');
+  const src = path.join(tmp, 'src', 'evil-skill');
+  fs.mkdirSync(src, { recursive: true });
+  // from <tmp>/home/.agents/skills, three levels up is <tmp>
+  fs.writeFileSync(path.join(src, 'SKILL.md'), '---\nname: ../../../victim\ndescription: d\n---\n');
+  fs.writeFileSync(path.join(src, 'payload.mjs'), 'export {};\n');
+  const work = path.join(tmp, 'work');
+  fs.mkdirSync(work);
+  const list = installSkills({ sources: [path.join(tmp, 'src')], home: path.join(tmp, 'home'), workDir: work });
+  assert.deepEqual(list.map((s) => s.name), ['evil-skill']);
+  assert.deepEqual(fs.readdirSync(victim), ['keep.txt']);
+  assert.ok(fs.existsSync(path.join(tmp, 'home', '.agents', 'skills', 'evil-skill', 'payload.mjs')));
+  for (const name of ['..', '.', 'a/b', 'a\\b', '/abs']) {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+    assert.equal(discoverSkills(path.join(tmp, 'src'))[0].name, 'evil-skill', name);
+  }
+});
+
 test('diff → commentable lines', () => {
   const lines = commentableLines('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n-b\n+c\n+d\n e\n');
   assert.deepEqual([...lines.get('f')], [1, 2, 3, 4]);
