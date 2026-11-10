@@ -297,6 +297,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       intent,
       targetBranch,
       openPr: inputs.openPr,
+      jsonSchema: inputs.jsonSchema,
     });
     return {
       run: true,

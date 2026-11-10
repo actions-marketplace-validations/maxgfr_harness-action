@@ -152,8 +152,11 @@ async function postReview({ github, context, inline, stateDir }) {
 }
 
 export async function publish({ env = process.env, stateDir }) {
-  const inputs = readInputs(env);
+  // Inputs given as a file path are not read again: those files sit in the working tree the
+  // agent just had. The schema is the one prepare parsed.
+  const inputs = readInputs(env, { files: false });
   const context = readJson(path.join(stateDir, 'context.json'), { run: false, mode: 'skip' });
+  const schema = context.jsonSchema ?? null;
   const set = core.setOutput;
   set('mode', context.mode ?? 'skip');
   set('harness', inputs.harness);
@@ -193,9 +196,9 @@ export async function publish({ env = process.env, stateDir }) {
 
   // structured output
   let structuredErrors = [];
-  if (inputs.jsonSchema) {
+  if (schema) {
     if (!structured) structuredErrors = ['the agent did not call submit_structured_output'];
-    else structuredErrors = validate(inputs.jsonSchema, structured);
+    else structuredErrors = validate(schema, structured);
     if (structuredErrors.length) errors.push(`Structured output invalid: ${structuredErrors.slice(0, 5).join('; ')}`);
   }
 
