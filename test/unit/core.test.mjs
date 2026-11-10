@@ -300,3 +300,18 @@ test('MCP server: newline and Content-Length framing, outbox, structured output'
   assert.match(header, /^Content-Length: \d+\r\n\r\n\{/);
   assert.equal(collect(dir).findings.length, 1);
 });
+
+test('MCP server: an invalid structured output is refused with the reason, so the agent can correct it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-mcp-schema-'));
+  fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ schema: { type: 'object', required: ['verdict'], properties: { verdict: { type: 'string', enum: ['pass', 'fail'] } } } }));
+  const call = (id, args) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'submit_structured_output', arguments: args } });
+  const out = await mcpSession(dir, 'line', [call(1, { verdict: 'maybe' }), call(2, {})]);
+  const [wrong, missing] = out.trim().split('\n').map((l) => JSON.parse(l).result);
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.content[0].text, /must be one of \["pass","fail"\]/);
+  assert.match(missing.content[0].text, /missing required property "verdict"/);
+  assert.ok(!fs.existsSync(path.join(dir, 'structured_output.json')));
+  const ok = JSON.parse((await mcpSession(dir, 'line', [call(3, { verdict: 'pass' })])).trim()).result;
+  assert.equal(ok.isError, undefined);
+  assert.deepEqual(collect(dir).structured, { verdict: 'pass' });
+});
