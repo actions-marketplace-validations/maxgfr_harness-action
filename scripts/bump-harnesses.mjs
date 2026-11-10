@@ -8,9 +8,9 @@ const versions = JSON.parse(fs.readFileSync(file, 'utf8'));
 const sh = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8' }).trim();
 const changes = [];
 for (const [id, meta] of Object.entries(versions)) {
-  const latest = meta.package ? sh('npm', ['view', meta.package, 'version']) : sh('git', ['ls-remote', meta.repo, 'HEAD']).split(/\s+/)[0];
+  const latest = sh('npm', ['view', meta.package, 'version']);
   if (latest && latest !== meta.version) {
-    changes.push(`${id}: ${meta.version.slice(0, 12)} → ${latest.slice(0, 12)}`);
+    changes.push(`${id}: ${meta.version} → ${latest}`);
     meta.version = latest;
   }
 }

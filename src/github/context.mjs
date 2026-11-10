@@ -13,7 +13,6 @@ export function readContext(env = process.env) {
   const isPR = Boolean(pr || issue?.pull_request);
   const number = pr?.number ?? issue?.number ?? payload.number ?? null;
   const comment = payload.comment ?? null;
-  const review = payload.review ?? null;
   const serverUrl = env.GITHUB_SERVER_URL || 'https://github.com';
 
   return {
@@ -27,16 +26,12 @@ export function readContext(env = process.env) {
     senderType: payload.sender?.type || '',
     number,
     isPR,
-    isIssue: Boolean(issue && !issue.pull_request),
     entity: pr ?? issue ?? null,
     comment,
-    review,
     defaultBranch: payload.repository?.default_branch || '',
     sha: env.GITHUB_SHA || '',
-    ref: env.GITHUB_REF || '',
     runUrl: `${serverUrl}/${owner}/${repo}/actions/runs/${env.GITHUB_RUN_ID || ''}`,
     serverUrl,
     runId: env.GITHUB_RUN_ID || '',
-    isFork: Boolean(pr && pr.head?.repo && pr.base?.repo && pr.head.repo.full_name !== pr.base.repo.full_name),
   };
 }

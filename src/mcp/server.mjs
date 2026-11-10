@@ -9,7 +9,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validate } from '../contract.mjs';
 
-let STATE = process.env.HARNESS_STATE ?? '';
+const STATE = process.env.HARNESS_STATE ?? '';
 const outbox = () => path.join(STATE, 'outbox.jsonl');
 
 function readJson(file, fallback) {
@@ -119,8 +119,6 @@ export function toolDefinitions(cfg) {
   }
   return tools;
 }
-
-export function setStateDir(dir) { STATE = dir; }
 
 function serve() {
   if (!STATE) {

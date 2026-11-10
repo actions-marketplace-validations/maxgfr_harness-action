@@ -70,9 +70,7 @@ export async function run({ stateDir, env = process.env }) {
   const adapter = getAdapter(plan.adapterId ?? plan.harness);
   const promptFile = path.join(stateDir, 'prompt.md');
   let firstPrompt = argvPrompt(promptFile);
-  const outDir = path.join(stateDir, 'out');
   const reportDir = path.join(stateDir, 'report');
-  fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(reportDir, { recursive: true });
 
   // `$env:NAME` values are references to the job environment, resolved only now.
@@ -85,7 +83,6 @@ export async function run({ stateDir, env = process.env }) {
     XDG_DATA_HOME: path.join(plan.home, '.local', 'share'),
     XDG_CACHE_HOME: path.join(plan.home, '.cache'),
     XDG_STATE_HOME: path.join(plan.home, '.local', 'state'),
-    HARNESS_OUT: outDir,
     CI: 'true',
     NO_COLOR: '1',
   });
@@ -167,7 +164,7 @@ export async function run({ stateDir, env = process.env }) {
       let check = null;
       if (loop.until) {
         core.info(`✓? completion check: ${loop.until}`);
-        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env), timeoutMinutes: loop.untilTimeoutMinutes ?? 15 });
+        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env) });
         it.check = { code: r.code };
         core.info(r.code === 0 ? '   passed' : `   failed (exit ${r.code})`);
         if (r.code === 0) { loopResult = 'passed'; break; }

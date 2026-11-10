@@ -1,8 +1,8 @@
 // Every input of action.yml, parsed and validated once.
 import fs from 'node:fs';
 import { getInput, getBool, getList } from './core/action.mjs';
+import { HARNESS_IDS } from './harness/index.mjs';
 
-export const HARNESSES = ['opencode', 'codex', 'pi', 'openclaw'];
 const TOOLS = ['auto', 'read-only', 'edit', 'full'];
 const SEVERITIES = ['error', 'warning', 'notice'];
 
@@ -42,7 +42,7 @@ function oneOf(name, value, allowed) {
  */
 export function readInputs(env = process.env, { files = true } = {}) {
   const o = { env };
-  const harness = oneOf('harness', getInput('harness', o) || 'opencode', HARNESSES);
+  const harness = oneOf('harness', getInput('harness', o) || 'opencode', HARNESS_IDS);
   const model = getInput('model', o);
   const failOn = getInput('fail_on', o);
   const harnessConfigRaw = getInput('harness_config', o);
@@ -100,7 +100,6 @@ export function readInputs(env = process.env, { files = true } = {}) {
     branchPrefix: getInput('branch_prefix', o) || 'harness/',
     branchNameTemplate: getInput('branch_name_template', o),
     commitMode: oneOf('commit_mode', getInput('commit_mode', o) || 'auto', ['auto', 'pr-branch', 'new-branch', 'none']),
-    additionalPermissions: getInput('additional_permissions', o),
 
     // reporting
     failOn: failOn ? oneOf('fail_on', failOn, SEVERITIES) : '',

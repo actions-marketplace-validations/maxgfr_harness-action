@@ -134,7 +134,7 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       else if ((exitCode !== 0 && !benignExit) || fatalError || (!acc.finalText && acc.errors.length)) status = 'error';
       fs.closeSync(exec);
       if (raw) fs.closeSync(raw);
-      resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason, stderrTail });
+      resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason });
     });
   });
 }

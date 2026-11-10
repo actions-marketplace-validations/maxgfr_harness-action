@@ -22,8 +22,8 @@ export function parseSource(raw, { cwd = process.cwd() } = {}) {
   if (hash >= 0) { skill = rest.slice(hash + 1) || null; rest = rest.slice(0, hash); }
   let ref = null;
   let url;
-  const m = /^(?:https?:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:@([^@\s]+))?$/.exec(rest);
-  if (m && !rest.includes('://') ) {
+  const m = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:@([^@\s]+))?$/.exec(rest); // owner/repo[@ref]
+  if (m) {
     url = `https://github.com/${m[1]}/${m[2]}.git`;
     ref = m[3] ?? null;
   } else if (/^https?:\/\//.test(rest)) {

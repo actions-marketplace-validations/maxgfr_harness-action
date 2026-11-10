@@ -17,7 +17,7 @@ On top of that:
 - **Persisted checkout credentials are removed for the run.** This covers the extraheader in `.git/config` and the credentials file `actions/checkout` v6+ keeps under `$RUNNER_TEMP`. They are recreated in Publish with `github_token`.
 - **The agent cannot push.** It edits files; the action commits them with `createCommitOnBranch` (signed by GitHub) to the branch it chose (`commit_mode`), never to the default branch. Changes to `.github/workflows/` are left out of the commit with the job token, which GitHub never lets change workflows: they stay in `changes.patch` and the reply lists them. Only a GitHub App token with the *workflows* permission, passed as `github_token`, can commit them; think twice before granting it, since a workflow runs with the repository's secrets.
 - **The MCP server holds no token.** Write tools append to an outbox file; read tools serve files fetched in Prepare.
-- **Install scripts get no token.** `npm install` of the harness and `cargo build` run with the same scrubbed environment.
+- **Install scripts get no token.** `npm install` of the harness runs with the same scrubbed environment.
 - The run uses an **isolated `$HOME`**, so the harness does not see the runner's `~/.gitconfig`, `~/.npmrc`, `~/.docker`, etc.
 
 ## What the agent can still reach
