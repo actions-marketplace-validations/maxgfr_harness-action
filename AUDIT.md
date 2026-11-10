@@ -63,9 +63,13 @@ workflow itself was not run, so the repository's provider secret was not used):
 | OpenCode | 1 finding, nothing written | 2 iterations, fixed from the check's output | resumed, remembers `LOOP.md` | $0.0045 |
 | OpenClaw | 1 finding, nothing written (no bootstrap file: B19) | 2 iterations, fixed from the check's output | resumed, remembers `LOOP.md` | $0.0092 |
 
-Codex was not run with a real model (it needs an OpenAI or OpenRouter key).
+`e2e-live.yml` itself was then run on GitHub runners, on v2.1.5, with the repository's
+`ANTHROPIC_API_KEY` (run 42907503483): OpenCode, Pi and OpenClaw each passed the three steps
+(1 finding; 2 loop iterations; conversation restored from the artifact store and resumed).
 
-Still not exercised for real: `e2e-live.yml` itself on a GitHub runner; the refusal of an artifact
+Codex was not run with a real model (it needs an OpenAI or OpenRouter key; its job is skipped).
+
+Still not exercised for real: the refusal of an artifact
 uploaded by a fork's run (unit-tested on the mock; it needs a fork to try); the branch
 continuation with `session_store: cache` (the resume itself is covered by CI); the checkout of a
 pull request for a read-only question (B18, same git commands as the push path, which is
