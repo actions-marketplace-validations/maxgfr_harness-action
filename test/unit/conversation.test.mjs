@@ -14,7 +14,7 @@ import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../
 import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt } from '../../src/stages/run.mjs';
 import { previousReply, conversationBranch, buildThread, ownComments, commentLister } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
-import { loopLine, finalBody } from '../../src/publish/render.mjs';
+import { loopLine, finalBody, findingsTable } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
 
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -122,6 +122,16 @@ test('earlier replies are part of the conversation, reduced to their text', () =
   const r = previousReply(body);
   assert.doesNotMatch(r, /harness-action:tracking|<sub>/);
   assert.match(r, /I fixed it\./);
+  // only the footer goes: a reply that uses <sub> itself keeps everything after it
+  const own = previousReply('<!-- harness-action:tracking -->\nStep 1\n<sub>a note</sub>\n\nStep 2: the important part.\n\n<sub>**pi** · `m` · 3s</sub>');
+  assert.match(own, /<sub>a note<\/sub>\n\nStep 2: the important part\.$/);
+});
+
+test('a finding title cannot break the findings table', () => {
+  const table = findingsTable([{ file: 'a.js', line: 1, severity: 'error', title: 'a | b', message: 'c | d\ne' }]);
+  const row = table.split('\n')[2];
+  assert.equal(row.split(/(?<!\\)\|/).length, 5); // 3 cells
+  assert.match(row, /\*\*a \\\| b\*\* — c \\\| d e/);
 });
 
 test('follow-up prompt of a resumed session is short and carries the new request', () => {

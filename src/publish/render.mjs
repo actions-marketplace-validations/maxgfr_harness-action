@@ -45,7 +45,8 @@ export function findingsTable(findings, { max = 30, blobUrl } = {}) {
   const rows = findings.slice(0, max).map((f) => {
     const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '—';
     const link = blobUrl && f.file ? `[\`${loc}\`](${blobUrl}/${f.file}${f.line ? `#L${f.line}${f.endLine ? `-L${f.endLine}` : ''}` : ''})` : `\`${loc}\``;
-    return `| ${SEV_ICON[f.severity]} ${f.severity} | ${link} | ${(f.title ? `**${f.title}** — ` : '') + f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`;
+    const text = `${f.title ? `**${f.title}** — ` : ''}${f.message}`;
+    return `| ${SEV_ICON[f.severity]} ${f.severity} | ${link} | ${text.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`;
   });
   const more = findings.length > max ? `\n\n…and ${findings.length - max} more (see the job summary / artifact).` : '';
   return `| Severity | Location | Finding |\n|---|---|---|\n${rows.join('\n')}${more}`;

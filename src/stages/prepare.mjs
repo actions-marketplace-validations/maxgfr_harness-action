@@ -23,7 +23,7 @@ const MAX_DIFF = 2 * 1024 * 1024;
 export function previousReply(body) {
   return String(body)
     .replace(/<!-- harness-action:[^>]*-->\n?/g, '')
-    .replace(/\n<sub>.*<\/sub>\s*$/s, '')
+    .replace(/\n<sub>[^\n]*<\/sub>\s*$/, '') // the footer: the last line, and only that one
     .trim();
 }
 
