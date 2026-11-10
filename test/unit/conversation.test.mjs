@@ -11,7 +11,7 @@ import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
 import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
-import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId } from '../../src/stages/run.mjs';
+import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt } from '../../src/stages/run.mjs';
 import { previousReply, conversationBranch, buildThread, ownComments, commentLister } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
 import { loopLine, finalBody } from '../../src/publish/render.mjs';
@@ -93,6 +93,19 @@ test('completion check runner', async () => {
   const r = await runCheck('echo boom; exit 3', { cwd: process.cwd(), env: process.env });
   assert.equal(r.code, 3);
   assert.match(r.output, /boom/);
+});
+
+test('a prompt too large for one command-line argument is passed as a file, measured in bytes', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-prompt-'));
+  const file = (name, text) => { const f = path.join(tmp, name); fs.writeFileSync(f, text); return f; };
+  const small = argvPrompt(file('small.md', 'do the thing'));
+  assert.equal(small, `${TURN_MARKER}\ndo the thing`);
+  // 40 000 characters, 120 000 bytes: over the limit although under it in characters
+  const wide = file('wide.md', '日'.repeat(40_000));
+  const pointer = argvPrompt(wide);
+  assert.ok(pointer.startsWith(TURN_MARKER));
+  assert.ok(pointer.includes(wide) && Buffer.byteLength(pointer) < 1000, pointer.slice(0, 200));
+  assert.equal(argvPrompt(file('ascii.md', 'a'.repeat(90_000))).length, TURN_MARKER.length + 1 + 90_000);
 });
 
 test('the completion check timeout stops everything the command started', async () => {

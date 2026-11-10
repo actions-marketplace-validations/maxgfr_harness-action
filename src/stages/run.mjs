@@ -15,7 +15,17 @@ import { runHarness, sanitizedEnv } from '../runner.mjs';
 import { readOutbox } from '../contract.mjs';
 import { truncate } from '../util.mjs';
 
-const MAX_ARGV_PROMPT = 100_000; // Linux caps one argv string at 128 KiB
+const MAX_ARGV_PROMPT = 100_000; // bytes: Linux caps one argv string at 128 KiB
+
+/**
+ * The prompt of a turn as one command-line argument. Too large for one (the limit is in bytes,
+ * and a non-ASCII character takes up to four), it becomes a pointer to the file that holds it.
+ */
+export function argvPrompt(file) {
+  const prompt = `${TURN_MARKER}\n${fs.readFileSync(file, 'utf8')}`;
+  if (Buffer.byteLength(prompt) <= MAX_ARGV_PROMPT) return prompt;
+  return `${TURN_MARKER}\nYour complete instructions are in the file ${file}. Read the whole file first, then follow it.`;
+}
 export const TURN_MARKER = '<!-- harness-turn -->';
 
 /** A harness session / thread id as the four harnesses write them (`ses_…`, a UUID). */
@@ -59,8 +69,7 @@ export async function run({ stateDir, env = process.env }) {
   const plan = JSON.parse(fs.readFileSync(path.join(stateDir, 'plan.json'), 'utf8'));
   const adapter = getAdapter(plan.adapterId ?? plan.harness);
   const promptFile = path.join(stateDir, 'prompt.md');
-  let firstPrompt = `${TURN_MARKER}\n${fs.readFileSync(promptFile, 'utf8')}`;
-  if (firstPrompt.length > MAX_ARGV_PROMPT) firstPrompt = `${TURN_MARKER}\nYour complete instructions are in the file ${promptFile}. Read the whole file first, then follow it.`;
+  let firstPrompt = argvPrompt(promptFile);
   const outDir = path.join(stateDir, 'out');
   const reportDir = path.join(stateDir, 'report');
   fs.mkdirSync(outDir, { recursive: true });
@@ -106,7 +115,7 @@ export async function run({ stateDir, env = process.env }) {
     }
   }
   const followupFile = path.join(stateDir, 'followup.md');
-  if (resumed && fs.existsSync(followupFile)) firstPrompt = `${TURN_MARKER}\n${fs.readFileSync(followupFile, 'utf8')}`;
+  if (resumed && fs.existsSync(followupFile)) firstPrompt = argvPrompt(followupFile);
 
   const started = Date.now();
   const total = { tools: 0, inputTokens: 0, outputTokens: 0, cost: 0, costKnown: false, errors: [] };
