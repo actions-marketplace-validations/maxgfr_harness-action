@@ -290,7 +290,9 @@ runs:
         HARNESS_INPUTS: ${{ toJSON(inputs) }}
       run: node "$GITHUB_ACTION_PATH/src/cli.mjs" resolve
 
+    # (not when the event is going to be skipped: the harness is hundreds of megabytes)
     - name: Cache the harness
+      if: steps.resolve.outputs.skip != 'true'
       uses: actions/cache@v6
       with:
         path: ${{ steps.resolve.outputs.cache_path }}

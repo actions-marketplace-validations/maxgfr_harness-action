@@ -266,6 +266,29 @@ test('mock LLM resolves steps against each harness tool shape', () => {
   assert.equal(resolveStep({ tool: 'x' }, [{ type: 'namespace', name: 'mcp__harness', tools: [{ type: 'function', name: 'x' }] }]).call.namespace, 'mcp__harness');
 });
 
+/** Runs `node src/cli.mjs resolve` like the first step of action.yml and returns its outputs. */
+function runResolve(inputs, { eventName, event }) {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-resolve-')));
+  fs.writeFileSync(path.join(tmp, 'event.json'), JSON.stringify(event));
+  const outputFile = path.join(tmp, 'output.txt');
+  fs.writeFileSync(outputFile, '');
+  execFileSync(process.execPath, [path.join(ROOT, 'src', 'cli.mjs'), 'resolve'], {
+    stdio: 'pipe',
+    env: { PATH: process.env.PATH, RUNNER_TEMP: tmp, GITHUB_OUTPUT: outputFile, GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: path.join(tmp, 'event.json'), GITHUB_REPOSITORY: 'acme/demo', GITHUB_RUN_ID: '42', HARNESS_INPUTS: JSON.stringify({ model: 'a/b', ...inputs }) },
+  });
+  const outputs = {};
+  for (const m of fs.readFileSync(outputFile, 'utf8').matchAll(/^([\w-]+)<<(ghadelim_[\w-]+)\n([\s\S]*?)\n\2$/gm)) outputs[m[1]] = m[3];
+  return { outputs, tmp };
+}
+
+test('resolve says when the event will be skipped, before anything is restored from a cache', () => {
+  const comment = (body) => ({ eventName: 'issue_comment', event: { action: 'created', issue: { number: 7, title: 't' }, comment: { id: 1, body } } });
+  assert.equal(runResolve({}, comment('thanks!')).outputs.skip, 'true');
+  assert.equal(runResolve({}, comment('@harness fix it')).outputs.skip, 'false');
+  assert.equal(runResolve({ prompt: 'triage this' }, comment('thanks!')).outputs.skip, 'false');
+  assert.equal(runResolve({}, { eventName: 'push', event: {} }).outputs.skip, 'true');
+});
+
 function mcpSession(stateDir, framing, messages) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(ROOT, 'src', 'mcp', 'server.mjs')], { env: { ...process.env, HARNESS_STATE: stateDir } });

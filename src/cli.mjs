@@ -10,6 +10,8 @@ import crypto from 'node:crypto';
 import * as core from './core/action.mjs';
 import { readInputs } from './inputs.mjs';
 import { resolveHarness } from './harness/index.mjs';
+import { readContext } from './github/context.mjs';
+import { detectMode } from './modes.mjs';
 
 function loadInputs(env) {
   if (!env.HARNESS_INPUTS) return env;
@@ -31,6 +33,10 @@ async function main() {
     const inputs = readInputs(env);
     for (const secret of [inputs.githubToken, inputs.skillsToken]) core.mask(secret);
     const { version, meta, adapterId } = resolveHarness(inputs.harness, inputs.harnessVersion);
+    // Whether there is anything to do is known from the event alone (no API call): say it now,
+    // so a run that is going to be skipped does not restore the harness from the cache first.
+    const { mode } = detectMode(readContext(env), inputs);
+    core.setOutput('skip', String(mode === 'skip'));
     const id = `${env.GITHUB_RUN_ID || 'local'}-${env.GITHUB_RUN_ATTEMPT || '1'}-${crypto.randomBytes(3).toString('hex')}`;
     const stateDir = path.join(tmp, 'harness-action', id);
     const toolsDir = path.join(tmp, 'harness-action-tools');
