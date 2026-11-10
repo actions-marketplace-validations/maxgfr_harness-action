@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as core from '../core/action.mjs';
-import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
+import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, sessionArtifactName } from '../inputs.mjs';
 import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
@@ -23,16 +23,104 @@ const MAX_DIFF = 2 * 1024 * 1024;
 export function previousReply(body) {
   return String(body)
     .replace(/<!-- harness-action:[^>]*-->\n?/g, '')
-    .replace(/\n<sub>.*<\/sub>\s*$/s, '')
+    .replace(/\n<sub>[^\n]*<\/sub>\s*$/, '') // the footer: the last line, and only that one
     .trim();
 }
 
-async function buildThread({ github, ctx, inputs, isPR, currentCommentId }) {
+/**
+ * A generated harness configuration as it may be shown in the report artifact, which anyone who
+ * can read the repository can download: the `headers` and `env` values of the user's MCP servers
+ * (tokens, connection strings) are replaced. Every harness config writes them as quoted strings.
+ */
+export function redactMcpSecrets(text, mcpConfig) {
+  let out = String(text);
+  for (const server of Object.values(mcpConfig ?? {})) {
+    for (const group of [server?.headers, server?.env]) {
+      for (const value of Object.values(group ?? {})) {
+        if (typeof value === 'string' && value) out = out.split(JSON.stringify(value)).join('"***"');
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Must the working tree be moved to the head of the pull request before the agent runs?
+ *   'required'    — the changes are pushed to that branch: without it the run cannot work;
+ *   'best-effort' — a run that commits nothing (a question, `tools: read-only`) started from a
+ *                   comment: the event belongs to the issue, so the checkout is the default
+ *                   branch, and the agent would answer about the wrong code;
+ *   null          — already there, no pull request, or a fork (its code is not checked out next
+ *                   to the provider keys on a comment).
+ */
+export function prCheckout({ pr, commitMode, eventName, atHead }) {
+  if (!pr || atHead) return null;
+  if (commitMode === 'pr-branch') return 'required';
+  if (commitMode === 'none' && eventName === 'issue_comment' && !pr.isFork) return 'best-effort';
+  return null;
+}
+
+/**
+ * The branch a restored conversation asks to continue on, or '' when it is not one this action
+ * would have created. The value comes from a saved artifact: it is never allowed to point the
+ * next commit at the default branch, at `base_branch`, or (unless a `branch_name_template`
+ * makes names free-form) outside `branch_prefix`.
+ */
+export function conversationBranch(branch, { defaultBranch = '', baseBranch = '', prefix = '', template = '' } = {}) {
+  if (typeof branch !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) || branch.includes('..')) return '';
+  if (branch === defaultBranch || branch === baseBranch) return '';
+  if (!template && prefix && !branch.startsWith(prefix)) return '';
+  return branch;
+}
+
+const hasMarker = (c) => String(c.body ?? '').includes(TRACKING_MARKER) || String(c.body ?? '').includes('<!-- harness-action:sticky:');
+
+/**
+ * Was this comment written by the action's token? `self` is the login behind a personal token;
+ * a job or app token has none (`null`) and always writes as a bot.
+ */
+export function isOwnComment(comment, self) {
+  const login = comment.user?.login ?? '';
+  return self ? login === self : comment.user?.type === 'Bot' || /\[bot\]$/i.test(login);
+}
+
+/**
+ * The comments of a thread that are the action's own, as a set of ids. The hidden markers are
+ * plain text anyone can paste into a comment: they only count when the author is the token's
+ * identity. Otherwise a stranger's text would be shown to the model as its own earlier reply
+ * (and skip the author filters), or be taken for the sticky comment and overwritten.
+ */
+export function ownComments(github) {
+  let self; // undefined: not asked yet
+  return async (comments) => {
+    const marked = comments.filter(hasMarker);
+    if (!marked.length) return new Set();
+    // (`GET /user` answers for a personal token only; it is refused to job and app tokens)
+    if (self === undefined) self = await github.get('/user').then((u) => u?.login ?? null, () => null);
+    return new Set(marked.filter((c) => isOwnComment(c, self)).map((c) => c.id));
+  };
+}
+
+/**
+ * The comments of the issue / pull request, listed once per run however many callers ask (the
+ * sticky-comment lookup and the thread both need them).
+ */
+export function commentLister(github, ctx) {
+  let list = null;
+  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 }));
+}
+
+export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own, listComments = commentLister(github, ctx) }) {
   const { owner, repo, number } = ctx;
-  const entity = isPR ? await github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? (await github.get(`/repos/${owner}/${repo}/issues/${number}`));
-  const comments = await github.paginate(`/repos/${owner}/${repo}/issues/${number}/comments`, { max: 300 });
+  // independent requests: one round trip instead of three
+  const [entity, comments, reviews] = await Promise.all([
+    isPR ? github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? github.get(`/repos/${owner}/${repo}/issues/${number}`),
+    listComments(),
+    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 }) : [],
+  ]);
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
-  const ours = (c) => String(c.body ?? '').includes(TRACKING_MARKER) || String(c.body ?? '').includes('<!-- harness-action:sticky:');
+  const mine = await own(comments);
+  const ours = (c) => mine.has(c.id);
   const keep = (c) => c.user && keepCommentAuthor(c.user.login, inputs) && !ours(c);
   for (const c of comments) {
     if (c.id === currentCommentId) continue;
@@ -44,7 +132,6 @@ async function buildThread({ github, ctx, inputs, isPR, currentCommentId }) {
     }
   }
   if (isPR) {
-    const reviews = await github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 });
     const kept = reviews.filter(keep);
     if (kept.length) {
       L.push('', '# Review comments');
@@ -106,6 +193,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
   const isPR = ctx.isPR;
 
+  const own = ownComments(github);
+  const listComments = commentLister(github, ctx);
+
   // --- tracking comment ----------------------------------------------------------------------
   let trackingCommentId = null;
   const tracking = wantsTrackingComment(ctx, inputs, modeInfo.mode) || (modeInfo.mode === 'automation' && inputs.postComment && ctx.number);
@@ -119,7 +209,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const body = workingBody({ harness: inputs.harness, model: inputs.model, runUrl: ctx.runUrl, sticky });
     try {
       if (sticky) {
-        const existing = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 })).find((c) => c.body?.includes(sticky));
+        const comments = await listComments();
+        const mine = await own(comments);
+        const existing = comments.find((c) => c.body?.includes(sticky) && mine.has(c.id));
         if (existing) { await github.patch(`/repos/${ctx.owner}/${ctx.repo}/issues/comments/${existing.id}`, { body }); trackingCommentId = existing.id; }
       }
       if (!trackingCommentId) trackingCommentId = (await github.post(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { body })).id;
@@ -137,32 +229,44 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     let changedFiles = [];
     let thread = null;
     if (ctx.number && (modeInfo.mode === 'tag' || isPR)) {
-      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId });
+      const t = await buildThread({ github, ctx, inputs, isPR, currentCommentId: trackingCommentId, own, listComments });
       thread = t.markdown;
       save('thread.md', thread);
       if (isPR) {
         const p = t.entity;
         pr = { number: p.number, headRef: p.head.ref, headSha: p.head.sha, baseRef: p.base.ref, baseSha: p.base.sha, isFork: p.head.repo?.full_name !== p.base.repo?.full_name, headRepo: p.head.repo?.full_name };
-        const diff = await github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch(() => '');
+        const [diff, files] = await Promise.all([
+          github.get(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}`, { accept: 'application/vnd.github.v3.diff', raw: true }).catch((err) => {
+            // (GitHub refuses the diff of a very large pull request with a 406)
+            core.warning(`Cannot fetch the diff of #${ctx.number} (${err.message}): get_pr_diff will be empty and review comments will be listed in the reply instead of on the lines.`);
+            return '';
+          }),
+          github.paginate(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}/files`, { max: 300 }),
+        ]);
         save('pr.diff', diff.length > MAX_DIFF ? diff.slice(0, MAX_DIFF) + '\n…diff truncated…\n' : diff);
-        changedFiles = (await github.paginate(`/repos/${ctx.owner}/${ctx.repo}/pulls/${ctx.number}/files`, { max: 300 })).map((f) => ({ filename: f.filename, status: f.status, additions: f.additions, deletions: f.deletions }));
+        changedFiles = files.map((f) => ({ filename: f.filename, status: f.status, additions: f.additions, deletions: f.deletions }));
       }
     }
 
-    // --- conversation: restored here from an artifact, or by the cache step that follows ---------
+    // --- conversation: restored here from an artifact, or just before this step from the cache --
+    // (the cache store: `resolve` emptied the directory and a step of action.yml filled it)
     const sessionDir = env.HARNESS_SESSION_DIR || path.join(env.RUNNER_TEMP || stateDir, 'harness-action-session');
+    const alreadyRestored = Boolean(env.HARNESS_SESSION_KEEP) || inputs.sessionStore === 'cache';
     let savedBranch = '';
     if (thread0) {
-      if (!env.HARNESS_SESSION_KEEP) fs.rmSync(sessionDir, { recursive: true, force: true });
+      if (!alreadyRestored) fs.rmSync(sessionDir, { recursive: true, force: true });
       fs.mkdirSync(sessionDir, { recursive: true });
       core.info(`Conversation: ${thread0}.`);
-      if (inputs.sessionStore === 'artifact' && !env.HARNESS_SESSION_KEEP) {
+      if (!alreadyRestored) {
         const r = await restoreSessionArtifact({ github, owner: ctx.owner, repo: ctx.repo, name: sessionArtifactName(adapterId, thread0), dir: sessionDir, tmpDir: stateDir })
           .catch((err) => ({ restored: false, reason: `could not restore it: ${err.message}` }));
         if (r.restored || /no saved/.test(r.reason)) core.info(`Saved conversation: ${r.reason}.`);
         else core.warning(`Saved conversation: ${r.reason}.`);
       }
       try { savedBranch = JSON.parse(fs.readFileSync(path.join(sessionDir, 'meta.json'), 'utf8')).branch ?? ''; } catch {}
+      const trusted = conversationBranch(savedBranch, { defaultBranch: ctx.defaultBranch, baseBranch: inputs.baseBranch, prefix: inputs.branchPrefix, template: inputs.branchNameTemplate });
+      if (savedBranch && !trusted) core.warning(`The saved conversation names the branch "${truncate(String(savedBranch), 100)}", which is not a branch this action creates: starting a new one.`);
+      savedBranch = trusted;
     }
 
     // Commit target decided now, so the right branch is checked out before credentials go away.
@@ -186,13 +290,28 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       core.warning(pr?.isFork ? 'The pull request comes from a fork: changes cannot be pushed to it; they are saved as a patch.' : 'commit_mode pr-branch needs a pull request; changes are saved as a patch.');
       commitMode = 'none';
     }
+    // The action never commits to the default branch, even when it is the head of a pull request.
+    if (commitMode === 'pr-branch' && ctx.defaultBranch && pr.headRef === ctx.defaultBranch) {
+      core.warning(`The head of this pull request is the default branch (${pr.headRef}): the action does not commit to it; changes are saved as a patch.`);
+      commitMode = 'none';
+    }
     const repoOk = isRepo(workDir);
     if (!repoOk && commitMode !== 'none') { core.warning(`${workDir} is not a git checkout: changes cannot be committed.`); commitMode = 'none'; }
-    if (repoOk && commitMode === 'pr-branch' && headSha(workDir) !== pr.headSha) {
+    const checkout = repoOk ? prCheckout({ pr, commitMode, eventName: ctx.eventName, atHead: headSha(workDir) === pr?.headSha }) : null;
+    if (checkout) {
       core.info(`Checking out ${pr.headRef} (${pr.headSha.slice(0, 7)})`);
-      git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${pr.headRef}:refs/remotes/origin/${pr.headRef}`], workDir);
-      git(['checkout', '-B', pr.headRef, `origin/${pr.headRef}`], workDir);
+      try {
+        git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${pr.headRef}:refs/remotes/origin/${pr.headRef}`], workDir);
+        git(['checkout', '-B', pr.headRef, `origin/${pr.headRef}`], workDir);
+      } catch (err) {
+        if (checkout === 'required') throw err;
+        core.warning(`Cannot check out ${pr.headRef}: the agent reads the pull request through its diff only. (${truncate(String(err.stderr || err.message).trim(), 300)})`);
+      }
     }
+    // Does the working tree hold the pull request's code? (a `pull_request*` event is checked
+    // out on its merge commit, except `pull_request_target`, which gets the base branch; a
+    // comment on a fork's pull request stays on the default branch)
+    const prCode = pr ? headSha(workDir) === pr.headSha || (ctx.eventName.startsWith('pull_request') && ctx.eventName !== 'pull_request_target') : false;
     if (repoOk && commitMode === 'new-branch' && inputs.baseBranch) {
       git(['fetch', '--no-tags', '--depth', '50', 'origin', `+refs/heads/${inputs.baseBranch}:refs/remotes/origin/${inputs.baseBranch}`], workDir);
       git(['checkout', '-B', inputs.baseBranch, `origin/${inputs.baseBranch}`], workDir);
@@ -222,7 +341,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     const prepared = adapter.prepare({ home, stateDir, workDir, model, endpoint, perms, mcpServers, mcpToolNames, harnessConfig: inputs.harnessConfig, warn });
     const reportDir = path.join(stateDir, 'report');
     fs.mkdirSync(path.join(reportDir, 'config'), { recursive: true });
-    for (const [name, content] of Object.entries(prepared.files ?? {})) fs.writeFileSync(path.join(reportDir, 'config', name), content);
+    for (const [name, content] of Object.entries(prepared.files ?? {})) fs.writeFileSync(path.join(reportDir, 'config', name), redactMcpSecrets(content, inputs.mcpConfig));
 
     // --- prompt ---------------------------------------------------------------------------------
     const triggerComment = ctx.eventName === 'pull_request_review_comment' ? { path: ctx.comment?.path, line: ctx.comment?.line, diffHunk: ctx.comment?.diff_hunk } : null;
@@ -239,6 +358,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       request: modeInfo.mode === 'tag' ? modeInfo.triggerText : inputs.prompt,
       extraInstructions: modeInfo.mode === 'tag' ? inputs.prompt : '',
       pr,
+      prCode,
       changedFiles,
       thread: thread && thread.length < 30_000 ? thread : thread ? '(long conversation: read it with the read_thread tool)' : null,
       triggerComment,
@@ -297,12 +417,11 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       intent,
       targetBranch,
       openPr: inputs.openPr,
+      jsonSchema: inputs.jsonSchema,
     });
     return {
       run: true,
       mode: modeInfo.mode,
-      sessionDir: thread0 ? sessionDir : '',
-      sessionRestorePrefix: thread0 && inputs.sessionStore === 'cache' ? sessionCachePrefix(adapterId, thread0) : '',
     };
   } catch (err) {
     // The tracking comment must not stay "working…" forever.

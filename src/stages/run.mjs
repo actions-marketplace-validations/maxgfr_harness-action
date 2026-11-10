@@ -15,18 +15,36 @@ import { runHarness, sanitizedEnv } from '../runner.mjs';
 import { readOutbox } from '../contract.mjs';
 import { truncate } from '../util.mjs';
 
-const MAX_ARGV_PROMPT = 100_000; // Linux caps one argv string at 128 KiB
+const MAX_ARGV_PROMPT = 100_000; // bytes: Linux caps one argv string at 128 KiB
+
+/**
+ * The prompt of a turn as one command-line argument. Too large for one (the limit is in bytes,
+ * and a non-ASCII character takes up to four), it becomes a pointer to the file that holds it.
+ */
+export function argvPrompt(file) {
+  const prompt = `${TURN_MARKER}\n${fs.readFileSync(file, 'utf8')}`;
+  if (Buffer.byteLength(prompt) <= MAX_ARGV_PROMPT) return prompt;
+  return `${TURN_MARKER}\nYour complete instructions are in the file ${file}. Read the whole file first, then follow it.`;
+}
 export const TURN_MARKER = '<!-- harness-turn -->';
+
+/** A harness session / thread id as the four harnesses write them (`ses_…`, a UUID). */
+export const isSessionId = (id) => typeof id === 'string' && /^[A-Za-z0-9][\w.-]{0,127}$/.test(id);
 
 /** Runs the completion check. Never throws. */
 export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group: the timeout must stop what the command started (`npm test` → node →
+    // …), not only the shell. Killing the shell alone leaves the rest running with the output
+    // pipes open, and this promise would wait for them.
+    const child = spawn('bash', ['-lc', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     let out = '';
     const keep = (c) => { out = (out + c).slice(-64_000); };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMinutes * 60_000);
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }, timeoutMinutes * 60_000);
     child.on('error', (err) => { clearTimeout(timer); resolve({ code: 127, output: err.message }); });
     child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code: code ?? (signal ? 124 : 1), output: out }); });
   });
@@ -51,11 +69,8 @@ export async function run({ stateDir, env = process.env }) {
   const plan = JSON.parse(fs.readFileSync(path.join(stateDir, 'plan.json'), 'utf8'));
   const adapter = getAdapter(plan.adapterId ?? plan.harness);
   const promptFile = path.join(stateDir, 'prompt.md');
-  let firstPrompt = `${TURN_MARKER}\n${fs.readFileSync(promptFile, 'utf8')}`;
-  if (firstPrompt.length > MAX_ARGV_PROMPT) firstPrompt = `${TURN_MARKER}\nYour complete instructions are in the file ${promptFile}. Read the whole file first, then follow it.`;
-  const outDir = path.join(stateDir, 'out');
+  let firstPrompt = argvPrompt(promptFile);
   const reportDir = path.join(stateDir, 'report');
-  fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(reportDir, { recursive: true });
 
   // `$env:NAME` values are references to the job environment, resolved only now.
@@ -68,7 +83,6 @@ export async function run({ stateDir, env = process.env }) {
     XDG_DATA_HOME: path.join(plan.home, '.local', 'share'),
     XDG_CACHE_HOME: path.join(plan.home, '.cache'),
     XDG_STATE_HOME: path.join(plan.home, '.local', 'state'),
-    HARNESS_OUT: outDir,
     CI: 'true',
     NO_COLOR: '1',
   });
@@ -88,6 +102,9 @@ export async function run({ stateDir, env = process.env }) {
     try { saved = JSON.parse(fs.readFileSync(meta, 'utf8')); } catch {}
     if (saved && saved.harness === (plan.adapterId ?? plan.harness)) {
       sessionId = await adapter.importSession({ ...helper, dir: session.dir }).catch(() => null);
+      // The id comes from the saved conversation and goes on the harness command line: an id,
+      // never something a CLI would read as an option.
+      if (!isSessionId(sessionId)) sessionId = null;
       resumed = Boolean(sessionId);
       core.info(resumed ? `↺ Resuming the conversation (session ${sessionId}, ${saved.turns ?? '?'} earlier turn(s)).` : 'A saved conversation was found but could not be restored: starting a new session.');
     } else if (saved) {
@@ -95,7 +112,7 @@ export async function run({ stateDir, env = process.env }) {
     }
   }
   const followupFile = path.join(stateDir, 'followup.md');
-  if (resumed && fs.existsSync(followupFile)) firstPrompt = `${TURN_MARKER}\n${fs.readFileSync(followupFile, 'utf8')}`;
+  if (resumed && fs.existsSync(followupFile)) firstPrompt = argvPrompt(followupFile);
 
   const started = Date.now();
   const total = { tools: 0, inputTokens: 0, outputTokens: 0, cost: 0, costKnown: false, errors: [] };
@@ -147,7 +164,7 @@ export async function run({ stateDir, env = process.env }) {
       let check = null;
       if (loop.until) {
         core.info(`✓? completion check: ${loop.until}`);
-        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env), timeoutMinutes: loop.untilTimeoutMinutes ?? 15 });
+        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env) });
         it.check = { code: r.code };
         core.info(r.code === 0 ? '   passed' : `   failed (exit ${r.code})`);
         if (r.code === 0) { loopResult = 'passed'; break; }

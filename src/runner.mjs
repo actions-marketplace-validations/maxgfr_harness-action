@@ -47,6 +47,7 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
     let lastErrorIndex = -1;
     let eventIndex = 0;
     let lastTextIndex = -1;
+    let lastToolIndex = -1;
 
     const child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 
@@ -64,6 +65,7 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       eventIndex++;
       if (ev.t === 'error') lastErrorIndex = eventIndex;
       if (ev.t === 'text') lastTextIndex = eventIndex;
+      if (ev.t === 'tool' || ev.t === 'tool_result') lastToolIndex = eventIndex;
       if (!showFullOutput) { const d = describe(ev); if (d) log(d); }
       if (limits.maxSteps && acc.tools > limits.maxSteps) kill(`more than ${limits.maxSteps} tool calls (max_steps)`);
       if (limits.budgetUsd && acc.costKnown && acc.cost > limits.budgetUsd) kill(`cost $${acc.cost.toFixed(4)} exceeds budget_usd $${limits.budgetUsd}`);
@@ -77,7 +79,9 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       if (!line.trim().startsWith('{')) return;
       let obj;
       try { obj = JSON.parse(line); } catch { return; }
-      for (const ev of adapter.parse(obj)) emit(ev);
+      let events;
+      try { events = adapter.parse(obj); } catch { return; } // an event of a shape the adapter does not know
+      for (const ev of events) emit(ev);
     });
 
     child.stdout.setEncoding('utf8');
@@ -89,6 +93,10 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       if (showFullOutput) process.stderr.write(c);
     });
 
+    // A harness that exits before it has read its prompt closes the pipe under us (EPIPE). The
+    // exit code and stderr say what happened; an unhandled stream error would kill this process
+    // before it can report them.
+    child.stdin.on('error', () => {});
     if (stdin != null) child.stdin.end(stdin); else child.stdin.end();
 
     const timer = setTimeout(() => kill(`timeout after ${limits.timeoutMinutes} min (timeout_minutes)`), limits.timeoutMinutes * 60_000);
@@ -102,15 +110,21 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       clearTimeout(timer);
       lines.end();
       if (!adapter.streaming) {
-        for (const ev of adapter.parseAll(stdoutAll)) emit(ev);
+        // (a parser that throws here would leave this promise pending for ever)
+        let events;
+        try { events = adapter.parseAll(stdoutAll); } catch (err) { events = [{ t: 'error', message: `cannot read the output of ${adapter.id}: ${err.message}` }]; }
+        for (const ev of events) emit(ev);
         if (limits.budgetUsd && acc.costKnown && acc.cost > limits.budgetUsd && !killedReason) killedReason = `cost $${acc.cost.toFixed(4)} exceeds budget_usd $${limits.budgetUsd}`;
       }
       const exitCode = code ?? (signal ? 128 : 1);
       const exitDetail = `${adapter.id} exited with code ${exitCode}${stderrTail ? `: ${truncate(stderrTail.trim().split('\n').slice(-5).join(' | '), 600)}` : ''}`;
       // A non-zero exit AFTER a finished turn (a final message, no error since) is reported but
       // does not fail the run: the work is done (seen with OpenCode 2 after failed tool calls).
-      const finishedTurn = Boolean(acc.finalText) && lastErrorIndex < lastTextIndex;
-      const benignExit = exitCode !== 0 && !killedReason && adapter.streaming && finishedTurn && !acc.errors.length;
+      // A turn is finished when its message is the last thing the agent did: text followed by
+      // more tool calls is a remark made on the way, and a process that died on a signal (out of
+      // memory, killed) did not finish anything.
+      const finishedTurn = Boolean(acc.finalText) && lastErrorIndex < lastTextIndex && lastToolIndex < lastTextIndex;
+      const benignExit = exitCode !== 0 && !signal && !killedReason && adapter.streaming && finishedTurn && !acc.errors.length;
       if (benignExit) emit({ t: 'warning', message: `${exitDetail} after finishing its turn; the result is kept` });
       else if (exitCode !== 0 && !acc.errors.length && !killedReason) emit({ t: 'error', message: exitDetail });
       // A provider error the harness recovered from (a retry that produced an answer) is not fatal.
@@ -120,7 +134,7 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       else if ((exitCode !== 0 && !benignExit) || fatalError || (!acc.finalText && acc.errors.length)) status = 'error';
       fs.closeSync(exec);
       if (raw) fs.closeSync(raw);
-      resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason, stderrTail });
+      resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason });
     });
   });
 }

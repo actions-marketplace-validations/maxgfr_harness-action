@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
 import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
-import { parseSource, parseFrontmatter, discoverSkills, installSkills } from '../../src/skills.mjs';
+import { parseSource, parseFrontmatter, discoverSkills, installSkills, cloneSource, authEnv } from '../../src/skills.mjs';
 import { commentableLines } from '../../src/git.mjs';
-import { branchNameFor, splitWorkflowChanges } from '../../src/stages/publish.mjs';
+import { branchNameFor, splitWorkflowChanges, splitInlineComments } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
 
@@ -91,6 +91,16 @@ test('json schema validation', () => {
   assert.deepEqual(validate(schema, { ok: true, items: ['a'] }), []);
   assert.equal(validate(schema, { ok: 1, items: ['c'], x: 1 }).length, 3);
   assert.match(validate(schema, {}).join(), /missing required property "ok"/);
+  // a pattern that is not a valid regular expression is reported, it does not throw
+  assert.deepEqual(validate({ type: 'string', pattern: '^[a-z]+$' }, 'abc'), []);
+  assert.match(validate({ type: 'string', pattern: '(unclosed' }, 'abc').join(), /not a valid regular expression/);
+});
+
+test('findings: an end line needs a start line', () => {
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', end_line: null }).endLine, undefined);
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', end_line: 9 }).endLine, undefined);
+  assert.equal(normalizeFinding({ file: 'a', message: 'm', line: 4, end_line: 2 }).endLine, undefined);
+  assert.deepEqual([normalizeFinding({ file: 'a', message: 'm', line: 4, end_line: '9' })].map((f) => [f.line, f.endLine]), [[4, 9]]);
 });
 
 test('findings: normalisation, gate, SARIF, table', () => {
@@ -154,9 +164,79 @@ test('skills are installed into the isolated home, repository skills included', 
   for (const base of ['.agents/skills']) assert.ok(fs.existsSync(path.join(tmp, 'home', base, 'echo-check', 'SKILL.md')));
 });
 
+test('a failed skills clone does not put the token in its error', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-skill-clone-'));
+  // no network: github.com is rewritten to a directory that does not exist
+  const gitconfig = path.join(tmp, 'gitconfig');
+  fs.writeFileSync(gitconfig, `[url "${path.join(tmp, 'nowhere')}/"]\n\tinsteadOf = https://github.com/\n`);
+  const saved = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = gitconfig;
+  const token = 'ghp_skillsTokenThatMustNotLeak';
+  const encoded = Buffer.from(`x-access-token:${token}`).toString('base64');
+  // git does get the header, from its environment, and only for github.com
+  const env = authEnv({ url: 'https://github.com/acme/private-skills.git' }, token);
+  assert.equal(execFileSync('git', ['config', '--get', 'http.https://github.com/.extraheader'], { env: { ...process.env, ...env }, encoding: 'utf8' }).trim(), `AUTHORIZATION: basic ${encoded}`);
+  assert.deepEqual(authEnv({ url: 'https://gitlab.com/acme/skills.git' }, token), {});
+  try {
+    for (const ref of [null, 'v1', 'abcdef1234']) {
+      let message = '';
+      try { cloneSource({ url: 'https://github.com/acme/private-skills.git', ref }, path.join(tmp, `dest-${ref}`), token); } catch (err) { message = `${err.message}\n${err.stack}`; }
+      assert.match(message, /Cannot fetch skills from https:\/\/github\.com\/acme\/private-skills\.git/, String(ref));
+      assert.ok(!message.includes(token) && !message.includes(encoded) && !/AUTHORIZATION/i.test(message), message);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved;
+  }
+});
+
+test('a skill name cannot escape the skills directory', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-skill-name-'));
+  const victim = path.join(tmp, 'victim');
+  fs.mkdirSync(victim);
+  fs.writeFileSync(path.join(victim, 'keep.txt'), 'keep');
+  const src = path.join(tmp, 'src', 'evil-skill');
+  fs.mkdirSync(src, { recursive: true });
+  // from <tmp>/home/.agents/skills, three levels up is <tmp>
+  fs.writeFileSync(path.join(src, 'SKILL.md'), '---\nname: ../../../victim\ndescription: d\n---\n');
+  fs.writeFileSync(path.join(src, 'payload.mjs'), 'export {};\n');
+  const work = path.join(tmp, 'work');
+  fs.mkdirSync(work);
+  const list = installSkills({ sources: [path.join(tmp, 'src')], home: path.join(tmp, 'home'), workDir: work });
+  assert.deepEqual(list.map((s) => s.name), ['evil-skill']);
+  assert.deepEqual(fs.readdirSync(victim), ['keep.txt']);
+  assert.ok(fs.existsSync(path.join(tmp, 'home', '.agents', 'skills', 'evil-skill', 'payload.mjs')));
+  for (const name of ['..', '.', 'a/b', 'a\\b', '/abs']) {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+    assert.equal(discoverSkills(path.join(tmp, 'src'))[0].name, 'evil-skill', name);
+  }
+});
+
 test('diff → commentable lines', () => {
   const lines = commentableLines('diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n-b\n+c\n+d\n e\n');
   assert.deepEqual([...lines.get('f')], [1, 2, 3, 4]);
+});
+
+test('diff parsing: content that looks like a header, several files, deleted files', () => {
+  const diff = [
+    'diff --git a/notes.md b/notes.md', '--- a/notes.md', '+++ b/notes.md',
+    '@@ -1,2 +1,4 @@', ' intro', '++ counter;', '+-- a comment', ' outro', // added lines `+ counter;` and `-- a comment`
+    '@@ -10 +12,2 @@', ' ten', '+eleven', '\\ No newline at end of file',
+    'diff --git a/gone.txt b/gone.txt', '--- a/gone.txt', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-a', '--- b',
+    'diff --git a/new.txt b/new.txt', '--- /dev/null', '+++ b/new.txt', '@@ -0,0 +1 @@', '+only',
+  ].join('\n');
+  const lines = commentableLines(diff);
+  assert.deepEqual([...lines.keys()], ['notes.md', 'new.txt']);
+  assert.deepEqual([...lines.get('notes.md')], [1, 2, 3, 4, 12, 13]);
+  assert.deepEqual([...lines.get('new.txt')], [1]);
+
+  const { inside, outside } = splitInlineComments([
+    { path: './notes.md', line: 3, body: 'a' }, // `./` is how some agents write paths
+    { path: 'notes.md', line: 13, start_line: 12, body: 'b' },
+    { path: 'notes.md', line: 7, body: 'between the hunks' },
+    { path: 'gone.txt', line: 1, body: 'deleted file' },
+  ], lines);
+  assert.deepEqual(inside.map((c) => [c.path, c.line]), [['notes.md', 3], ['notes.md', 13]]);
+  assert.deepEqual(outside.map((c) => c.body), ['between the hunks', 'deleted file']);
 });
 
 test('workflow files are split from the rest of a commit', () => {
@@ -184,6 +264,45 @@ test('mock LLM resolves steps against each harness tool shape', () => {
   assert.equal(resolveStep({ tool: 'report_finding' }, [{ function: { name: 'harness_report_finding' } }]).call.name, 'harness_report_finding');
   assert.equal(resolveStep({ shell: 'ls' }, [{ type: 'function', name: 'exec_command', parameters: { properties: { cmd: { type: 'string' } } } }]).call.args.cmd, 'ls');
   assert.equal(resolveStep({ tool: 'x' }, [{ type: 'namespace', name: 'mcp__harness', tools: [{ type: 'function', name: 'x' }] }]).call.namespace, 'mcp__harness');
+});
+
+/** Runs `node src/cli.mjs resolve` like the first step of action.yml and returns its outputs. */
+function runResolve(inputs, { eventName, event }, { before = () => {} } = {}) {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-resolve-')));
+  before(tmp);
+  fs.writeFileSync(path.join(tmp, 'event.json'), JSON.stringify(event));
+  const outputFile = path.join(tmp, 'output.txt');
+  fs.writeFileSync(outputFile, '');
+  execFileSync(process.execPath, [path.join(ROOT, 'src', 'cli.mjs'), 'resolve'], {
+    stdio: 'pipe',
+    env: { PATH: process.env.PATH, RUNNER_TEMP: tmp, GITHUB_OUTPUT: outputFile, GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: path.join(tmp, 'event.json'), GITHUB_REPOSITORY: 'acme/demo', GITHUB_RUN_ID: '42', HARNESS_INPUTS: JSON.stringify({ model: 'a/b', ...inputs }) },
+  });
+  const outputs = {};
+  for (const m of fs.readFileSync(outputFile, 'utf8').matchAll(/^([\w-]+)<<(ghadelim_[\w-]+)\n([\s\S]*?)\n\2$/gm)) outputs[m[1]] = m[3];
+  return { outputs, tmp };
+}
+
+test('resolve says when the event will be skipped, before anything is restored from a cache', () => {
+  const comment = (body) => ({ eventName: 'issue_comment', event: { action: 'created', issue: { number: 7, title: 't' }, comment: { id: 1, body } } });
+  assert.equal(runResolve({}, comment('thanks!')).outputs.skip, 'true');
+  assert.equal(runResolve({}, comment('@harness fix it')).outputs.skip, 'false');
+  assert.equal(runResolve({ prompt: 'triage this' }, comment('thanks!')).outputs.skip, 'false');
+  assert.equal(runResolve({}, { eventName: 'push', event: {} }).outputs.skip, 'true');
+});
+
+test('resolve names the cached conversation, so that it is restored before prepare reads its branch', () => {
+  const mention = { eventName: 'issue_comment', event: { action: 'created', issue: { number: 7, title: 't' }, comment: { id: 1, body: '@harness do the second option' } } };
+  // a directory left by an earlier use of the action in the same job must not be taken for the restored one
+  const stale = (tmp) => { fs.mkdirSync(path.join(tmp, 'harness-action-session')); fs.writeFileSync(path.join(tmp, 'harness-action-session', 'meta.json'), '{"branch":"harness/stale"}'); };
+  const cache = runResolve({ session_store: 'cache', harness: 'pi' }, mention, { before: stale });
+  assert.equal(cache.outputs.session_restore_prefix, 'harness-session-v1-pi-issue-7-');
+  assert.equal(cache.outputs.session_dir, path.join(cache.tmp, 'harness-action-session'));
+  assert.deepEqual(fs.readdirSync(cache.outputs.session_dir), []);
+  // the artifact store is restored by prepare itself; no conversation → nothing to restore
+  assert.equal(runResolve({ harness: 'pi' }, mention).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache', session: 'off' }, mention).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache' }, { eventName: 'push', event: {} }).outputs.session_restore_prefix, '');
+  assert.equal(runResolve({ session_store: 'cache', session_key: 'my chat', prompt: 'hi' }, { eventName: 'push', event: {} }).outputs.session_restore_prefix, 'harness-session-v1-opencode-my-chat-');
 });
 
 function mcpSession(stateDir, framing, messages) {
@@ -219,4 +338,19 @@ test('MCP server: newline and Content-Length framing, outbox, structured output'
   const header = await mcpSession(dir, 'header', msgs.slice(0, 1));
   assert.match(header, /^Content-Length: \d+\r\n\r\n\{/);
   assert.equal(collect(dir).findings.length, 1);
+});
+
+test('MCP server: an invalid structured output is refused with the reason, so the agent can correct it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-mcp-schema-'));
+  fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ schema: { type: 'object', required: ['verdict'], properties: { verdict: { type: 'string', enum: ['pass', 'fail'] } } } }));
+  const call = (id, args) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'submit_structured_output', arguments: args } });
+  const out = await mcpSession(dir, 'line', [call(1, { verdict: 'maybe' }), call(2, {})]);
+  const [wrong, missing] = out.trim().split('\n').map((l) => JSON.parse(l).result);
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.content[0].text, /must be one of \["pass","fail"\]/);
+  assert.match(missing.content[0].text, /missing required property "verdict"/);
+  assert.ok(!fs.existsSync(path.join(dir, 'structured_output.json')));
+  const ok = JSON.parse((await mcpSession(dir, 'line', [call(3, { verdict: 'pass' })])).trim()).result;
+  assert.equal(ok.isError, undefined);
+  assert.deepEqual(collect(dir).structured, { verdict: 'pass' });
 });

@@ -18,6 +18,7 @@ export function capture(bin, args, { env, cwd, timeoutMs = 120_000, stdin = null
     child.stderr.on('data', (c) => (stderr += c));
     child.on('error', (err) => { clearTimeout(timer); resolve({ code: 127, stdout, stderr: err.message }); });
     child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+    child.stdin.on('error', () => {}); // the command exited without reading it: its exit code tells
     child.stdin.end(stdin ?? undefined);
   });
 }

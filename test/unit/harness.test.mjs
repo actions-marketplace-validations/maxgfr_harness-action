@@ -3,14 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
+import { createClient } from '../../src/github/api.mjs';
 import { runHarness } from '../../src/runner.mjs';
+import { capture } from '../../src/harness/exec.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
-import { buildConfig as codexConfig } from '../../src/harness/codex.mjs';
+import { buildConfig as codexConfig, withUserToml } from '../../src/harness/codex.mjs';
+import { readInputs } from '../../src/inputs.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
+import { redactMcpSecrets } from '../../src/stages/prepare.mjs';
+import { toToml } from '../../src/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
 
@@ -88,6 +94,29 @@ test('codex config: sandbox, providers, MCP auto-approval', () => {
   assert.throws(() => codexConfig({ ...base, model: { provider: 'anthropic', id: 'x' }, endpoint: resolveEndpoint({ provider: 'anthropic' }) }), /OpenAI-compatible/);
 });
 
+test('codex: TOML harness_config keeps its top-level keys at the top level', () => {
+  const base = { model: { provider: 'openai', id: 'gpt-5.1' }, endpoint: resolveEndpoint({ provider: 'openai' }), perms: permissionProfile('edit'), mcpServers: { harness: { command: 'node', args: ['s'] } }, workDir: '/w' };
+  const generated = toToml(codexConfig(base), { inline: [/^mcp_servers\.[^.]+\.(env|http_headers)$/] });
+  const user = 'model_reasoning_effort = "high"\nmodel = "gpt-5.1-codex" # mine\n\n[profiles.ci]\napproval_policy = "never"\n';
+  const merged = withUserToml(generated, user);
+  const firstTable = merged.search(/^\[/m);
+  assert.ok(merged.indexOf('model_reasoning_effort = "high"') < firstTable, merged); // not inside [projects."/w"]
+  assert.deepEqual(merged.match(/^model = .*$/gm), ['model = "gpt-5.1-codex" # mine']); // the user's value, once
+  assert.match(merged, /^approval_policy = "never"$/m); // generated keys the user did not set stay
+  assert.ok(merged.indexOf('[profiles.ci]') > merged.indexOf('[projects."/w"]'));
+  assert.equal(merged.match(/^approval_policy/gm).length, 2); // top level + the user's profile
+  // tables only, or keys only
+  assert.ok(withUserToml(generated, '[profiles.ci]\na = 1\n').startsWith('model = "gpt-5.1"'));
+  assert.ok(withUserToml(generated, 'x = [\n  1,\n]\n').indexOf('x = [') < withUserToml(generated, 'x = [\n  1,\n]\n').search(/^\[/m));
+
+  // a .toml path is read, like a .json path is
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-toml-')), 'codex.toml');
+  fs.writeFileSync(file, user);
+  const read = (over) => readInputs({ INPUT_MODEL: 'a/b', INPUT_HARNESS_CONFIG: over }).harnessConfig;
+  assert.equal(read(file), user);
+  assert.equal(read('a = "b.toml"'), 'a = "b.toml"'); // inline TOML is kept as it is
+});
+
 test('pi tool list keeps MCP tools', () => {
   assert.deepEqual(toolList(permissionProfile('read-only')), ['read', 'grep', 'find', 'ls', 'mcp__*']);
   assert.ok(toolList(permissionProfile('full')).includes('bash'));
@@ -122,12 +151,90 @@ test('runner: exit 1 after a finished turn keeps the result; exit 1 without one 
   const bad = await run(fake([{ type: 'step_start', sessionID: 's', part: {} }], 1));
   assert.equal(bad.status, 'error');
   assert.match(bad.acc.errors.at(-1), /exited with code 1/);
+
+  // a remark followed by more work is not a finished turn: the harness died in the middle
+  const midTask = [
+    { type: 'text', sessionID: 's', part: { text: 'I will start by reading the code.' } },
+    { type: 'tool_use', part: { tool: 'edit', state: { status: 'completed', input: {}, output: 'ok' } } },
+  ];
+  const crashed = await run(fake(midTask, 2));
+  assert.equal(crashed.status, 'error');
+  assert.match(crashed.acc.errors.at(-1), /exited with code 2/);
+  // … and neither is a process killed by a signal, whatever it printed last
+  const script = path.join(tmp, 'killed.mjs');
+  fs.writeFileSync(script, `console.log(${JSON.stringify(JSON.stringify(finished[1]))});\nsetTimeout(() => process.kill(process.pid, 'SIGKILL'), 50);\nsetTimeout(() => {}, 5000);\n`);
+  const killed = await run(script);
+  assert.equal(killed.status, 'error');
+});
+
+test('runner: a harness that exits without reading its stdin is an error, not a crash', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-stdin-'));
+  // codex gets its prompt on stdin; a prompt larger than the pipe buffer is still being written
+  // when the process is already gone
+  const result = await runHarness({ adapter: getAdapter('codex'), bin: process.execPath, args: ['-e', 'process.exit(3)'], stdin: 'x'.repeat(2_000_000), cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: () => {} });
+  assert.equal(result.status, 'error');
+  assert.equal(result.exitCode, 3);
+  const helper = await capture(process.execPath, ['-e', 'process.exit(4)'], { env: process.env, cwd: tmp, stdin: 'x'.repeat(2_000_000) });
+  assert.equal(helper.code, 4);
+});
+
+test('openclaw: output that is JSON but not a result document is an error, and the run still ends', async () => {
+  const a = getAdapter('openclaw');
+  for (const out of ['null', '42', '"oops"']) assert.match(a.parseAll(out)[0].message, /printed no result/, out);
+  assert.deepEqual(a.parseAll(''), []);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-openclaw-'));
+  const result = await runHarness({ adapter: a, bin: process.execPath, args: ['-e', 'console.log("null")'], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: () => {} });
+  assert.equal(result.status, 'error');
+});
+
+test('GitHub client: a dropped connection is retried for a read, never for a write', async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.method);
+    // the first request of each method is cut before any answer
+    if (seen.filter((m) => m === req.method).length === 1) return req.socket.destroy();
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1 });
+  try {
+    assert.deepEqual(await github.get('/x'), { ok: true });
+    assert.deepEqual(seen, ['GET', 'GET']);
+    await assert.rejects(github.post('/x', { a: 1 }));
+    assert.deepEqual(seen, ['GET', 'GET', 'POST']); // not sent twice
+  } finally {
+    server.close();
+  }
 });
 
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {
   const base = { model: { provider: 'anthropic', id: 'm' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), mcpServers: {} };
   assert.deepEqual(opencodeConfig({ ...base, perms: permissionProfile('full') }).websearch, { provider: 'exa' });
   assert.equal(opencodeConfig({ ...base, perms: permissionProfile('read-only') }).websearch, undefined);
+});
+
+test('MCP header and env values are redacted from the configs kept in the report', () => {
+  const mcpConfig = {
+    docs: { url: 'https://docs.example/mcp', headers: { Authorization: 'Bearer docs-token-123' } },
+    db: { command: 'npx', args: ['-y', 'db-mcp'], env: { DATABASE_URL: 'postgres://u:p"w@host/db', MODE: 'ro' } },
+  };
+  const mcpServers = { ...mcpConfig, harness: { command: 'node', args: ['s.mjs'], env: { HARNESS_STATE: '/tmp/state' } } };
+  const base = { model: { provider: 'openai', id: 'm' }, endpoint: resolveEndpoint({ provider: 'openai' }), perms: permissionProfile('read-only'), mcpServers, workDir: '/w', skillsDir: '/s' };
+  const configs = [
+    JSON.stringify(opencodeConfig(base), null, 2),
+    toToml(codexConfig(base), { inline: [/^mcp_servers\.[^.]+\.(env|http_headers)$/] }),
+    JSON.stringify(openclawConfig(base), null, 2),
+  ];
+  for (const text of configs) {
+    assert.match(text, /docs-token-123/); // the live config needs them
+    const shown = redactMcpSecrets(text, mcpConfig);
+    assert.doesNotMatch(shown, /docs-token-123|postgres:|p\\"w/);
+    assert.match(shown, /"\*\*\*"/);
+    assert.match(shown, /docs\.example\/mcp/); // not a secret
+    assert.match(shown, /\/tmp\/state/); // the action's own server is left alone
+  }
+  assert.equal(redactMcpSecrets('{"a":"b"}', null), '{"a":"b"}');
 });
 
 test('splitArgs honours quotes', () => {

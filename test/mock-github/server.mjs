@@ -62,6 +62,7 @@ export function createGitHubMock({ owner = 'acme', repo = 'demo', pr = null, iss
       json(404, { message: `mock: no route for ${req.method} ${p}` });
     });
   });
-  const addArtifact = (name, data) => artifacts.push({ id: artifacts.length + 1, name, created_at: new Date(Date.now() + artifacts.length).toISOString(), expired: false, workflow_run: { id: 100 + artifacts.length }, data });
+  // `headRepositoryId` other than 1: uploaded by the run of a fork's pull request
+  const addArtifact = (name, data, { headRepositoryId = 1 } = {}) => artifacts.push({ id: artifacts.length + 1, name, created_at: new Date(Date.now() + artifacts.length).toISOString(), expired: false, workflow_run: { id: 100 + artifacts.length, repository_id: 1, head_repository_id: headRepositoryId }, data });
   return { server, calls, comments, addArtifact };
 }

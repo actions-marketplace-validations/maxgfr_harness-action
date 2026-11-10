@@ -7,8 +7,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { validate } from '../contract.mjs';
 
-let STATE = process.env.HARNESS_STATE ?? '';
+const STATE = process.env.HARNESS_STATE ?? '';
 const outbox = () => path.join(STATE, 'outbox.jsonl');
 
 function readJson(file, fallback) {
@@ -107,6 +108,10 @@ export function toolDefinitions(cfg) {
       description: 'Submit the final structured result of this task. The arguments must follow the required JSON schema. Call it exactly once, at the end.',
       inputSchema: cfg.schema,
       run: (args) => {
+        // Checked here, while the agent can still correct it: the publish step validates the
+        // same way, but by then the run is over and an invalid result is a failed run.
+        const errors = validate(cfg.schema, args);
+        if (errors.length) throw new Error(`the result does not follow the schema (${errors.slice(0, 10).join('; ')}). Nothing was recorded: fix it and call this tool again.`);
         fs.writeFileSync(path.join(STATE, 'structured_output.json'), JSON.stringify(args, null, 2));
         return 'Structured output recorded.';
       },
@@ -114,8 +119,6 @@ export function toolDefinitions(cfg) {
   }
   return tools;
 }
-
-export function setStateDir(dir) { STATE = dir; }
 
 function serve() {
   if (!STATE) {

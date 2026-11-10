@@ -96,6 +96,8 @@ export default {
       const start = trimmed.indexOf('{');
       try { obj = JSON.parse(trimmed.slice(start)); } catch { return trimmed ? [{ t: 'error', message: trimmed.slice(-2000) }] : []; }
     }
+    // valid JSON that is not the result document (`null`, a number, a string)
+    if (obj === null || typeof obj !== 'object') return [{ t: 'error', message: `openclaw printed no result: ${trimmed.slice(-2000)}` }];
     if (obj.ok === false || obj.error) {
       const issues = (obj.issues ?? []).map((i) => `${i.path}: ${i.message}`).join('; ');
       return [{ t: 'error', message: `${obj.error?.message ?? 'openclaw failed'}${issues ? ` (${issues})` : ''}` }];

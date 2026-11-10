@@ -45,7 +45,8 @@ export function findingsTable(findings, { max = 30, blobUrl } = {}) {
   const rows = findings.slice(0, max).map((f) => {
     const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '—';
     const link = blobUrl && f.file ? `[\`${loc}\`](${blobUrl}/${f.file}${f.line ? `#L${f.line}${f.endLine ? `-L${f.endLine}` : ''}` : ''})` : `\`${loc}\``;
-    return `| ${SEV_ICON[f.severity]} ${f.severity} | ${link} | ${(f.title ? `**${f.title}** — ` : '') + f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`;
+    const text = `${f.title ? `**${f.title}** — ` : ''}${f.message}`;
+    return `| ${SEV_ICON[f.severity]} ${f.severity} | ${link} | ${text.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`;
   });
   const more = findings.length > max ? `\n\n…and ${findings.length - max} more (see the job summary / artifact).` : '';
   return `| Severity | Location | Finding |\n|---|---|---|\n${rows.join('\n')}${more}`;
@@ -62,6 +63,7 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
   if (branch) {
     const pr = branch.pullUrl ? ` · [**Pull request #${branch.pullNumber} ➔**](${branch.pullUrl})` : branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : '';
     L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${pr}`);
+    if (branch.skipped?.length) L.push('', `> ⚠️ Not committed — symbolic links and nested repositories cannot be committed through the API: ${branch.skipped.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact).`);
     if (branch.leftOut?.length) L.push('', `> ⚠️ Not committed — the job token cannot change workflow files: ${branch.leftOut.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact); a GitHub App token with the *workflows* permission as \`github_token\` can commit them.`);
   }
   if (review) L.push('', `💬 Posted a review with ${review} inline comment${review === 1 ? '' : 's'}.`);

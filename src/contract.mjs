@@ -13,7 +13,8 @@ export function readOutbox(stateDir) {
 export function normalizeFinding(f) {
   const severity = ['error', 'warning', 'notice'].includes(f.severity) ? f.severity : 'warning';
   const line = Number.isInteger(Number(f.line)) && Number(f.line) > 0 ? Number(f.line) : undefined;
-  const endLine = Number.isInteger(Number(f.end_line)) && Number(f.end_line) >= (line ?? 0) ? Number(f.end_line) : undefined;
+  // (an end line only means something after a start line; `null` must not become line 0)
+  const endLine = line && Number.isInteger(Number(f.end_line)) && Number(f.end_line) >= line ? Number(f.end_line) : undefined;
   return {
     file: String(f.file ?? f.path ?? '').replace(/^\.\//, ''),
     line,
@@ -60,7 +61,13 @@ export function validate(schema, value, at = '$') {
   if (typeof value === 'string') {
     if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${at}: shorter than ${schema.minLength}`);
     if (schema.maxLength !== undefined && value.length > schema.maxLength) errors.push(`${at}: longer than ${schema.maxLength}`);
-    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(`${at}: does not match ${schema.pattern}`);
+    if (schema.pattern) {
+      let re = null;
+      // a pattern that is not a JavaScript regular expression is the schema's mistake: say so
+      // instead of throwing in the middle of the publish step
+      try { re = new RegExp(schema.pattern); } catch { errors.push(`${at}: the schema's pattern ${schema.pattern} is not a valid regular expression`); }
+      if (re && !re.test(value)) errors.push(`${at}: does not match ${schema.pattern}`);
+    }
   }
   if (typeof value === 'number') {
     if (schema.minimum !== undefined && value < schema.minimum) errors.push(`${at}: below ${schema.minimum}`);

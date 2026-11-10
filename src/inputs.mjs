@@ -1,15 +1,25 @@
 // Every input of action.yml, parsed and validated once.
 import fs from 'node:fs';
 import { getInput, getBool, getList } from './core/action.mjs';
+import { HARNESS_IDS } from './harness/index.mjs';
 
-export const HARNESSES = ['opencode', 'codex', 'pi', 'openclaw'];
 const TOOLS = ['auto', 'read-only', 'edit', 'full'];
 const SEVERITIES = ['error', 'warning', 'notice'];
 
-function parseJsonInput(name, raw) {
+const isInlineJson = (raw) => raw.startsWith('{') || raw.startsWith('[');
+
+/** Inline JSON, or the path of a JSON file (read only when `files` is true). */
+function parseJsonInput(name, raw, files = true) {
   if (!raw) return null;
-  const text = raw.startsWith('{') || raw.startsWith('[') ? raw : fs.readFileSync(raw, 'utf8');
+  if (!isInlineJson(raw) && !files) return null;
+  const text = isInlineJson(raw) ? raw : fs.readFileSync(raw, 'utf8');
   try { return JSON.parse(text); } catch (err) { throw new Error(`Input ${name} is not valid JSON: ${err.message}`); }
+}
+
+/** Inline TOML, or the path of a `.toml` file (one line, no `=`): its content. */
+function readTomlInput(raw, files = true) {
+  const isPath = /\.toml$/i.test(raw) && !/[\n=]/.test(raw);
+  return isPath && files ? fs.readFileSync(raw, 'utf8') : raw;
 }
 
 function positiveNumber(name, raw, dflt) {
@@ -24,9 +34,15 @@ function oneOf(name, value, allowed) {
   return value;
 }
 
-export function readInputs(env = process.env) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.files] Read the inputs given as a file path (`json_schema`,
+ *   `mcp_config`, `harness_config`). Only the prepare step does: afterwards those files are in a
+ *   working tree the agent may have rewritten, so the later steps take what prepare parsed.
+ */
+export function readInputs(env = process.env, { files = true } = {}) {
   const o = { env };
-  const harness = oneOf('harness', getInput('harness', o) || 'opencode', HARNESSES);
+  const harness = oneOf('harness', getInput('harness', o) || 'opencode', HARNESS_IDS);
   const model = getInput('model', o);
   const failOn = getInput('fail_on', o);
   const harnessConfigRaw = getInput('harness_config', o);
@@ -40,11 +56,11 @@ export function readInputs(env = process.env) {
     apiKeyEnv: getInput('api_key_env', o),
     harnessArgs: getInput('harness_args', o),
     harnessConfig: harnessConfigRaw
-      ? harnessConfigRaw.startsWith('{') || harnessConfigRaw.startsWith('[') || /\.json$/i.test(harnessConfigRaw)
-        ? parseJsonInput('harness_config', harnessConfigRaw)
-        : harnessConfigRaw // TOML for codex, kept verbatim
+      ? isInlineJson(harnessConfigRaw) || /\.json$/i.test(harnessConfigRaw)
+        ? parseJsonInput('harness_config', harnessConfigRaw, files)
+        : readTomlInput(harnessConfigRaw, files) // TOML for codex, kept verbatim
       : null,
-    mcpConfig: parseJsonInput('mcp_config', getInput('mcp_config', o)),
+    mcpConfig: parseJsonInput('mcp_config', getInput('mcp_config', o), files),
     skills: getList('skills', o),
     skillsToken: getInput('skills_token', o),
     skill: getInput('skill', o),
@@ -53,7 +69,7 @@ export function readInputs(env = process.env) {
     maxSteps: positiveNumber('max_steps', getInput('max_steps', o), 200),
     timeoutMinutes: positiveNumber('timeout_minutes', getInput('timeout_minutes', o), 30),
     budgetUsd: positiveNumber('budget_usd', getInput('budget_usd', o), 0),
-    jsonSchema: parseJsonInput('json_schema', getInput('json_schema', o)),
+    jsonSchema: parseJsonInput('json_schema', getInput('json_schema', o), files),
 
     // conversation + loop
     session: oneOf('session', getInput('session', o) || 'auto', ['auto', 'on', 'off']),
@@ -84,7 +100,6 @@ export function readInputs(env = process.env) {
     branchPrefix: getInput('branch_prefix', o) || 'harness/',
     branchNameTemplate: getInput('branch_name_template', o),
     commitMode: oneOf('commit_mode', getInput('commit_mode', o) || 'auto', ['auto', 'pr-branch', 'new-branch', 'none']),
-    additionalPermissions: getInput('additional_permissions', o),
 
     // reporting
     failOn: failOn ? oneOf('fail_on', failOn, SEVERITIES) : '',

@@ -16,8 +16,9 @@ On top of that:
 
 - **Persisted checkout credentials are removed for the run.** This covers the extraheader in `.git/config` and the credentials file `actions/checkout` v6+ keeps under `$RUNNER_TEMP`. They are recreated in Publish with `github_token`.
 - **The agent cannot push.** It edits files; the action commits them with `createCommitOnBranch` (signed by GitHub) to the branch it chose (`commit_mode`), never to the default branch. Changes to `.github/workflows/` are left out of the commit with the job token, which GitHub never lets change workflows: they stay in `changes.patch` and the reply lists them. Only a GitHub App token with the *workflows* permission, passed as `github_token`, can commit them; think twice before granting it, since a workflow runs with the repository's secrets.
+- **Publish does not trust the working tree.** Only regular files are committed: a symbolic link is never followed (it is listed in the reply and kept in `changes.patch`). The git commands Publish runs there ignore the repository's hooks, `core.fsmonitor`, filter drivers and external diff programs, and the checkout credentials come back only after them. `json_schema` given as a file is the one read before the run.
 - **The MCP server holds no token.** Write tools append to an outbox file; read tools serve files fetched in Prepare.
-- **Install scripts get no token.** `npm install` of the harness and `cargo build` run with the same scrubbed environment.
+- **Install scripts get no token.** `npm install` of the harness runs with the same scrubbed environment.
 - The run uses an **isolated `$HOME`**, so the harness does not see the runner's `~/.gitconfig`, `~/.npmrc`, `~/.docker`, etc.
 
 ## What the agent can still reach
@@ -36,11 +37,15 @@ Who can read it:
 
 So treat a conversation as being as public as the repository. In particular, don't let the agent print secrets in a session you resume. Use `session: off` if your conversations can hold sensitive data. Saved conversations expire after `session_retention_days`.
 
+A conversation is only restored from an artifact uploaded by a workflow run of this repository, never by the run of a fork's pull request. The branch it names must be one the action creates (inside `branch_prefix`, never the default branch or `base_branch`); otherwise a new branch is started.
+
+The report artifact holds the generated harness configuration; the `headers` and `env` values of `mcp_config` are redacted in it. Values you put in `harness_config` are not: keep secrets out of it.
+
 The restored session is read by the run step only, which has no token. The agent cannot write a saved conversation itself: saving happens in a later step, and the runtime token is stripped from its environment.
 
 ## Who can trigger it
 
-In tag mode, and for comment events, the actor must have **write** access to the repository. Bots are refused unless listed in `allowed_bots`. `allowed_non_write_users` opens the agent to anyone you list (`*` = everyone): only do that with `tools: read-only` and no `commit_mode`.
+In tag mode, and for comment events, the actor must have **write** access to the repository. Bots are refused unless listed in `allowed_bots`. The action's hidden comment markers only count on comments written by its own token: pasting one into a comment does not make it the agent's earlier reply. `allowed_non_write_users` opens the agent to anyone you list (`*` = everyone): only do that with `tools: read-only` and no `commit_mode`.
 
 ## Recommendations
 

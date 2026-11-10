@@ -1,4 +1,4 @@
-// Pi adapter — `pi --mode json --no-session` with a private PI_CODING_AGENT_DIR.
+// Pi adapter — `pi --mode json --session-dir <dir>` with a private PI_CODING_AGENT_DIR.
 import fs from 'node:fs';
 import path from 'node:path';
 import { npmInstall } from './install.mjs';

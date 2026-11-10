@@ -19,8 +19,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const VERSIONS = JSON.parse(fs.readFileSync(path.join(HERE, 'versions.json'), 'utf8'));
 export const MCP_SERVER = path.resolve(HERE, '..', 'mcp', 'server.mjs');
 
-export const HARNESS_IDS = ['opencode', 'codex', 'pi', 'openclaw'];
 const ADAPTERS = { opencode, codex, pi, openclaw };
+/** The harnesses the `harness` input accepts. */
+export const HARNESS_IDS = Object.keys(ADAPTERS);
 
 export function getAdapter(id) {
   const a = ADAPTERS[id];

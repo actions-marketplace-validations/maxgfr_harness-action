@@ -1,15 +1,27 @@
 // Stage 3 (holds the GitHub token): replay the outbox, commit, comment, report, gate.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import * as core from '../core/action.mjs';
 import { readInputs, sessionCachePrefix, sessionArtifactName } from '../inputs.mjs';
 import { createClient } from '../github/api.mjs';
 import { collect, failsGate, validate } from '../contract.mjs';
-import { workingTreeChanges, diffPatch, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo } from '../git.mjs';
+import { treeChanges, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 
 const readJson = (f, d = null) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
+
+/** The normalised events of the run. A line cut short (a cancelled run) is skipped, not fatal. */
+export function readEvents(file) {
+  if (!fs.existsSync(file)) return [];
+  const events = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line) continue;
+    try { events.push(JSON.parse(line)); } catch {}
+  }
+  return events;
+}
 
 export function branchNameFor({ template, prefix, ctx, now = new Date() }) {
   const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
@@ -21,18 +33,24 @@ export function branchNameFor({ template, prefix, ctx, now = new Date() }) {
   return name.replace(/[^A-Za-z0-9._/-]+/g, '-').replace(/\/{2,}/g, '/').replace(/^[-/]+|[-/.]+$/g, '');
 }
 
-async function commitChanges({ github, inputs, context, workDir, reportDir }) {
+export async function commitChanges({ github, inputs, context, workDir, reportDir }) {
   const { ctx, commitMode, pr } = context;
   if (!isRepo(workDir)) return { branch: null };
-  const changes = workingTreeChanges(workDir);
+  // The whole repository, from its root: `working_directory` may be a sub-directory of it.
+  const root = repoRoot(workDir);
+  // Compared with the commit the run started from: an agent that committed locally (it is told
+  // not to) still gets its work published.
+  const changes = treeChanges(root, context.baseHead || 'HEAD');
   if (!changes.any) return { branch: null };
-  const patch = diffPatch(workDir);
-  fs.writeFileSync(path.join(reportDir, 'changes.patch'), patch);
+  fs.writeFileSync(path.join(reportDir, 'changes.patch'), changes.patch);
   core.info(`Working tree: ${changes.additions.length} file(s) added/modified, ${changes.deletions.length} deleted.`);
   if (commitMode === 'none') {
-    core.notice(`The agent changed ${changes.additions.length + changes.deletions.length} file(s); commit_mode is none, so they are only saved as changes.patch in the artifact.`);
+    core.notice(`The agent changed ${changes.additions.length + changes.deletions.length + changes.skipped.length} file(s); commit_mode is none, so they are only saved as changes.patch in the artifact.`);
     return { branch: null, patch: true };
   }
+  const { skipped } = changes;
+  if (skipped.length) core.warning(`Not committed (${skipped.length}): ${skipped.join(', ')}. Symbolic links and nested repositories cannot be committed through the API; they are in changes.patch.`);
+  if (!changes.additions.length && !changes.deletions.length) return { branch: null, patch: true };
   const request = String(context.request || '').replace(/\s+/g, ' ').replace(new RegExp(inputs.triggerPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '').trim();
   const headline = truncate(`${context.harness}: ${request || 'apply changes'}`, 72).replace(/… \(.*$/, '…');
   const coauthor = ctx.actorId ? `\n\nCo-authored-by: ${ctx.actor} <${ctx.actorId}+${ctx.actor}@users.noreply.github.com>` : '';
@@ -45,10 +63,18 @@ async function commitChanges({ github, inputs, context, workDir, reportDir }) {
     branch = context.targetBranch; // the branch an earlier turn of this conversation created
   } else {
     branch = branchNameFor({ template: inputs.branchNameTemplate, prefix: inputs.branchPrefix, ctx });
-    await createBranch({ github, owner: ctx.owner, repo: ctx.repo, branch, sha: context.baseHead });
+    try {
+      await createBranch({ github, owner: ctx.owner, repo: ctx.repo, branch, sha: context.baseHead });
+    } catch (err) {
+      // The name is only unique to the minute (or whatever the template says): a second run in
+      // the same minute must not lose its commit over it.
+      if (err.status !== 422 || !/already exists/i.test(err.message)) throw err;
+      branch = `${branch}-${crypto.randomBytes(2).toString('hex')}`;
+      await createBranch({ github, owner: ctx.owner, repo: ctx.repo, branch, sha: context.baseHead });
+    }
     created = true;
   }
-  const commitArgs = { github, owner: ctx.owner, repo: ctx.repo, branch, expectedHeadOid: context.baseHead, cwd: workDir, headline, body };
+  const commitArgs = { github, owner: ctx.owner, repo: ctx.repo, branch, expectedHeadOid: context.baseHead, cwd: root, headline, body };
   let commit;
   let leftOut = [];
   try {
@@ -72,11 +98,13 @@ async function commitChanges({ github, inputs, context, workDir, reportDir }) {
   core.info(`Committed ${commit.oid.slice(0, 7)} to ${branch} (signed by GitHub).`);
   const repoUrl = `${ctx.serverUrl}/${ctx.owner}/${ctx.repo}`;
   const continued = commitMode === 'continue-branch';
-  const baseBranch = inputs.baseBranch || (continued ? ctx.defaultBranch : context.branchName) || ctx.defaultBranch;
+  // (a detached checkout has no branch: `git rev-parse --abbrev-ref HEAD` answers "HEAD")
+  const checkedOut = context.branchName === 'HEAD' ? '' : context.branchName;
+  const baseBranch = inputs.baseBranch || (continued ? ctx.defaultBranch : checkedOut) || ctx.defaultBranch;
   const prUrl = (created || continued) && !ctx.isPR
     ? `${repoUrl}/compare/${encodeURIComponent(baseBranch)}...${encodeURIComponent(branch)}?quick_pull=1&title=${encodeURIComponent(truncate(ctx.title || headline, 120))}&body=${encodeURIComponent(`${ctx.number ? `Closes #${ctx.number}\n\n` : ''}Generated by ${context.harness} (${context.model}) — ${ctx.runUrl}`)}`
     : null;
-  return { branch: { name: branch, created, url: `${repoUrl}/tree/${encodeURIComponent(branch)}`, commitUrl: commit.url, prUrl, sha: commit.oid, base: baseBranch, headline, leftOut } };
+  return { branch: { name: branch, created, url: `${repoUrl}/tree/${encodeURIComponent(branch)}`, commitUrl: commit.url, prUrl, sha: commit.oid, base: baseBranch, headline, leftOut, skipped } };
 }
 
 const WORKFLOW_FILE = /^\.github\/workflows\//;
@@ -106,17 +134,24 @@ export async function openPullRequest({ github, context, branch, finalText, harn
   return { number: pr.number, url: pr.html_url };
 }
 
+/** Review comments GitHub will accept (on a line of the diff) apart from the others. */
+export function splitInlineComments(inline, lines) {
+  const inside = [];
+  const outside = [];
+  for (const raw of inline) {
+    const c = { ...raw, path: String(raw.path).replace(/^\.\//, '') }; // `./a.js` is `a.js` in the diff
+    const ok = lines.get(c.path)?.has(Number(c.line)) && (!c.start_line || lines.get(c.path)?.has(Number(c.start_line)));
+    (ok ? inside : outside).push(c);
+  }
+  return { inside, outside };
+}
+
 async function postReview({ github, context, inline, stateDir }) {
   const { ctx, pr } = context;
   if (!pr || !inline.length) return { posted: 0, outside: [] };
   const diff = fs.existsSync(path.join(stateDir, 'pr.diff')) ? fs.readFileSync(path.join(stateDir, 'pr.diff'), 'utf8') : '';
   const lines = commentableLines(diff);
-  const inside = [];
-  const outside = [];
-  for (const c of inline) {
-    const ok = lines.get(c.path)?.has(Number(c.line)) && (!c.start_line || lines.get(c.path)?.has(Number(c.start_line)));
-    (ok ? inside : outside).push(c);
-  }
+  const { inside, outside } = splitInlineComments(inline, lines);
   if (!inside.length) return { posted: 0, outside };
   const comments = inside.map((c) => ({
     path: c.path,
@@ -135,8 +170,11 @@ async function postReview({ github, context, inline, stateDir }) {
 }
 
 export async function publish({ env = process.env, stateDir }) {
-  const inputs = readInputs(env);
+  // Inputs given as a file path are not read again: those files sit in the working tree the
+  // agent just had. The schema is the one prepare parsed.
+  const inputs = readInputs(env, { files: false });
   const context = readJson(path.join(stateDir, 'context.json'), { run: false, mode: 'skip' });
+  const schema = context.jsonSchema ?? null;
   const set = core.setOutput;
   set('mode', context.mode ?? 'skip');
   set('harness', inputs.harness);
@@ -153,7 +191,17 @@ export async function publish({ env = process.env, stateDir }) {
   const runFile = path.join(stateDir, 'run.json');
   const run = readJson(runFile);
 
-  if (context.removedCredentials) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
+  // git first. This is the only place where git runs in the checkout the agent worked in, and
+  // the checkout credentials come back only once that is over.
+  let branch = null;
+  let commitError = null;
+  try {
+    ({ branch } = await commitChanges({ github, inputs, context, workDir, reportDir }));
+  } catch (err) {
+    commitError = err;
+  } finally {
+    if (context.removedCredentials) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
+  }
 
   const status = run?.status ?? 'error';
   const { findings, inline, progress, structured } = collect(stateDir);
@@ -166,19 +214,15 @@ export async function publish({ env = process.env, stateDir }) {
 
   // structured output
   let structuredErrors = [];
-  if (inputs.jsonSchema) {
+  if (schema) {
     if (!structured) structuredErrors = ['the agent did not call submit_structured_output'];
-    else structuredErrors = validate(inputs.jsonSchema, structured);
+    else structuredErrors = validate(schema, structured);
     if (structuredErrors.length) errors.push(`Structured output invalid: ${structuredErrors.slice(0, 5).join('; ')}`);
   }
 
-  // git
-  let branch = null;
-  try {
-    ({ branch } = await commitChanges({ github, inputs, context, workDir, reportDir }));
-  } catch (err) {
-    errors.push(`Could not commit the changes: ${err.message}`);
-    core.warning(`Could not commit the changes: ${err.message}`);
+  if (commitError) {
+    errors.push(`Could not commit the changes: ${commitError.message}`);
+    core.warning(`Could not commit the changes: ${commitError.message}`);
   }
 
   // open_pr
@@ -263,9 +307,6 @@ export async function publish({ env = process.env, stateDir }) {
   }
 
   // job summary
-  const events = fs.existsSync(path.join(reportDir, 'execution.jsonl'))
-    ? fs.readFileSync(path.join(reportDir, 'execution.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
-    : [];
   core.summary(summaryMarkdown({
     harness: inputs.harness,
     version: context.version,
@@ -277,7 +318,8 @@ export async function publish({ env = process.env, stateDir }) {
     findings,
     branch,
     structured,
-    transcript: inputs.displayReport ? transcriptMarkdown(events) : '',
+    // (the log is only read for display_report: it can be tens of megabytes)
+    transcript: inputs.displayReport ? transcriptMarkdown(readEvents(path.join(reportDir, 'execution.jsonl'))) : '',
     errorText,
     blobUrl,
   }));

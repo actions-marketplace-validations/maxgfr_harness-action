@@ -37,11 +37,6 @@ export function setOutput(name, value) {
   else process.stdout.write(`[output] ${name}=${v.length > 200 ? v.slice(0, 200) + '…' : v}\n`);
 }
 
-export function exportVariable(name, value) {
-  process.env[name] = value;
-  if (process.env.GITHUB_ENV) appendKV(process.env.GITHUB_ENV, name, value);
-}
-
 export function summary(markdown) {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown + '\n');
   else if (process.env.HARNESS_SUMMARY_FILE) fs.appendFileSync(process.env.HARNESS_SUMMARY_FILE, markdown + '\n');
@@ -59,7 +54,6 @@ export function command(cmd, message, props = {}) {
 }
 
 export const info = (m) => process.stdout.write(`${m}\n`);
-export const debug = (m) => command('debug', m);
 export const warning = (m, props) => command('warning', m, props);
 export const error = (m, props) => command('error', m, props);
 export const notice = (m, props) => command('notice', m, props);
