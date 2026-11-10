@@ -16,6 +16,7 @@ import { git, isRepo, headSha, stripCredentials } from '../git.mjs';
 import { TRACKING_MARKER, stickyMarker, workingBody } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 import { toolDefinitions } from '../mcp/server.mjs';
+import { uncheckedKeywords } from '../contract.mjs';
 
 const MAX_DIFF = 2 * 1024 * 1024;
 
@@ -179,6 +180,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     return { run: false, mode: 'skip' };
   }
   core.info(`Mode: ${modeInfo.mode} (${modeInfo.reason}); ${access.reason}.`);
+  const unchecked = inputs.jsonSchema ? uncheckedKeywords(inputs.jsonSchema) : [];
+  if (unchecked.length) core.warning(`json_schema uses keywords this action does not validate: ${unchecked.join(', ')}. The structured output is checked against the rest of the schema only.`);
 
   const { adapter, adapterId, meta, version } = resolveHarness(inputs.harness, inputs.harnessVersion);
   const thread0 = sessionThread(inputs, ctx, modeInfo.mode);

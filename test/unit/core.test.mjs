@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent, intentFor } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
-import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
+import { validate, failsGate, normalizeFinding, collect, uncheckedKeywords } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
 import { parseSource, parseFrontmatter, discoverSkills, installSkills, cloneSource, authEnv } from '../../src/skills.mjs';
@@ -128,6 +128,47 @@ test('json schema validation', () => {
   // a pattern that is not a valid regular expression is reported, it does not throw
   assert.deepEqual(validate({ type: 'string', pattern: '^[a-z]+$' }, 'abc'), []);
   assert.match(validate({ type: 'string', pattern: '(unclosed' }, 'abc').join(), /not a valid regular expression/);
+});
+
+test('json schema: references, exclusive bounds, formats and the other keywords tool schemas use', () => {
+  const ok = (schema, value) => assert.deepEqual(validate(schema, value), [], JSON.stringify(value));
+  const bad = (schema, value, re) => assert.match(validate(schema, value).join(' | '), re, JSON.stringify(value));
+  // $ref inside the schema, recursion included
+  const tree = { $defs: { node: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, children: { type: 'array', items: { $ref: '#/$defs/node' } } } } }, $ref: '#/$defs/node' };
+  ok(tree, { name: 'a', children: [{ name: 'b', children: [] }] });
+  bad(tree, { name: 'a', children: [{ children: [] }] }, /\$\.children\[0\]: missing required property "name"/);
+  ok({ $ref: '#' }, 1); // a reference to itself ends
+  bad({ $ref: 'https://example.com/other.json' }, 1, /cannot be resolved/);
+  // numbers
+  bad({ exclusiveMinimum: 0 }, 0, /greater than 0/);
+  ok({ exclusiveMinimum: 0, exclusiveMaximum: 1 }, 0.5);
+  bad({ exclusiveMaximum: 1 }, 1, /less than 1/);
+  ok({ multipleOf: 0.1 }, 0.3);
+  bad({ multipleOf: 5 }, 12, /multiple of 5/);
+  // strings
+  ok({ format: 'date-time' }, '2026-11-10T21:41:24Z');
+  bad({ format: 'date-time' }, 'yesterday', /valid date-time/);
+  bad({ format: 'date' }, '2026-13-40', /valid date/);
+  ok({ format: 'email' }, 'a@b.co');
+  bad({ format: 'uuid' }, 'not-a-uuid', /valid uuid/);
+  ok({ format: 'hostname' }, 'anything'); // unknown formats are not checked (see uncheckedKeywords)
+  // arrays
+  bad({ uniqueItems: true }, [1, 2, 1], /unique/);
+  bad({ prefixItems: [{ type: 'string' }, { type: 'integer' }], items: false }, ['a', 1, 'extra'], /\$\[2\]: nothing is allowed/);
+  ok({ prefixItems: [{ type: 'string' }, { type: 'integer' }], items: false }, ['a', 1]);
+  // objects
+  bad({ minProperties: 1 }, {}, /fewer than 1 properties/);
+  bad({ patternProperties: { '^x-': { type: 'integer' } }, additionalProperties: false }, { 'x-a': 'no', other: 1 }, /\$\.x-a: expected integer[\s\S]*unexpected property "other"/);
+  // logic
+  bad({ not: { type: 'string' } }, 'a', /must not match/);
+  const conditional = { if: { properties: { kind: { const: 'file' } } }, then: { required: ['path'] }, else: { required: ['url'] } };
+  ok(conditional, { kind: 'file', path: 'a' });
+  bad(conditional, { kind: 'file' }, /missing required property "path"/);
+  bad(conditional, { kind: 'link' }, /missing required property "url"/);
+
+  // what is not validated is named, once, wherever it sits in the schema
+  assert.deepEqual(uncheckedKeywords(tree), []);
+  assert.deepEqual(uncheckedKeywords({ type: 'object', properties: { a: { format: 'hostname', contains: {} }, format: { type: 'string' } }, dependentRequired: { a: ['b'] }, items: { $ref: 'other.json#/x', unevaluatedProperties: false }, enum: [{ contains: 1 }] }).sort(), ['$ref: other.json#/x', 'contains', 'dependentRequired', 'format: hostname', 'unevaluatedProperties']);
 });
 
 test('findings: an end line needs a start line', () => {
