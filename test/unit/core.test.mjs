@@ -16,6 +16,7 @@ import { branchNameFor, splitWorkflowChanges, splitInlineComments } from '../../
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
 import { prDiff } from '../../src/mcp/server.mjs';
+import { makeRepo, commitAll } from './helpers.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -268,6 +269,30 @@ test('a failed skills clone does not put the token in its error', () => {
   } finally {
     if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved;
   }
+});
+
+test('skill sources: an abbreviated commit id, and a local directory that reads like owner/repo', () => {
+  const { repo } = makeRepo();
+  fs.mkdirSync(path.join(repo, 'review'));
+  fs.writeFileSync(path.join(repo, 'review', 'SKILL.md'), '---\nname: review\ndescription: first version\n---\n');
+  const first = commitAll(repo, 'add the skill');
+  fs.writeFileSync(path.join(repo, 'review', 'SKILL.md'), '---\nname: review\ndescription: second version\n---\n');
+  const second = commitAll(repo, 'change it');
+  const dest = (name) => path.join(path.dirname(repo), name);
+  const description = (dir) => discoverSkills(dir)[0].description;
+  // an abbreviated id of a commit that is not the tip: no server resolves it in a shallow fetch
+  cloneSource({ url: repo, ref: first.slice(0, 9) }, dest('short'));
+  assert.equal(description(dest('short')), 'first version');
+  cloneSource({ url: repo, ref: second }, dest('full'));
+  assert.equal(description(dest('full')), 'second version');
+  cloneSource({ url: repo, ref: 'main' }, dest('branch'));
+  assert.equal(description(dest('branch')), 'second version');
+  assert.throws(() => cloneSource({ url: repo, ref: 'abcdef123' }, dest('missing')), /Cannot fetch skills from/);
+
+  // owner/repo form, but the directory exists in the workspace
+  fs.mkdirSync(path.join(repo, 'skills', 'review'), { recursive: true });
+  assert.deepEqual(parseSource('skills/review', { cwd: repo }), { type: 'local', path: path.join(repo, 'skills', 'review'), raw: 'skills/review' });
+  assert.equal(parseSource('acme/review', { cwd: repo }).url, 'https://github.com/acme/review.git');
 });
 
 test('a skill name cannot escape the skills directory', () => {

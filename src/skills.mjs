@@ -16,6 +16,9 @@ export function parseSource(raw, { cwd = process.cwd() } = {}) {
   if (s.startsWith('.') || s.startsWith('/') || s.startsWith('~')) {
     return { type: 'local', path: path.resolve(cwd, s.replace(/^~(?=\/)/, os.homedir())), raw: s };
   }
+  // `skills/review` reads like owner/repo, but a directory of that name in the repository is
+  // what was meant: the local one wins, as for any path that exists.
+  try { if (fs.statSync(path.resolve(cwd, s)).isDirectory()) return { type: 'local', path: path.resolve(cwd, s), raw: s }; } catch {}
   let skill = null;
   let rest = s;
   const hash = rest.indexOf('#');
@@ -106,14 +109,24 @@ export function authEnv(src, token) {
 
 export function cloneSource(src, dest, token) {
   const env = { ...process.env, ...authEnv(src, token) };
-  const isSha = src.ref && /^[0-9a-f]{7,40}$/i.test(src.ref);
+  const ref = src.ref ?? '';
+  const shallow = () => git(['clone', '-q', '--depth', '1', '--single-branch', ...(ref ? ['--branch', ref] : []), src.url, dest], { env });
   try {
-    if (src.ref && isSha) {
+    if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(ref)) {
+      // a full commit id can be fetched on its own
       git(['init', '-q', dest]);
-      git(['-C', dest, 'fetch', '-q', '--depth', '1', src.url, src.ref], { env });
+      git(['-C', dest, 'fetch', '-q', '--depth', '1', src.url, ref], { env });
       git(['-C', dest, 'checkout', '-q', 'FETCH_HEAD']);
+    } else if (/^[0-9a-f]{7,39}$/i.test(ref)) {
+      // Hexadecimal, but not a full id: a branch or a tag with such a name, or an abbreviated
+      // commit id. A server only resolves an abbreviation in a clone that has the history.
+      try { shallow(); } catch {
+        fs.rmSync(dest, { recursive: true, force: true });
+        git(['clone', '-q', '--filter=blob:none', '--no-checkout', src.url, dest], { env });
+        git(['-C', dest, 'checkout', '-q', ref], { env });
+      }
     } else {
-      git(['clone', '-q', '--depth', '1', '--single-branch', ...(src.ref ? ['--branch', src.ref] : []), src.url, dest], { env });
+      shallow();
     }
   } catch (err) {
     // git's own words only
