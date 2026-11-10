@@ -159,7 +159,17 @@ export async function publish({ env = process.env, stateDir }) {
   const runFile = path.join(stateDir, 'run.json');
   const run = readJson(runFile);
 
-  if (context.removedCredentials) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
+  // git first. This is the only place where git runs in the checkout the agent worked in, and
+  // the checkout credentials come back only once that is over.
+  let branch = null;
+  let commitError = null;
+  try {
+    ({ branch } = await commitChanges({ github, inputs, context, workDir, reportDir }));
+  } catch (err) {
+    commitError = err;
+  } finally {
+    if (context.removedCredentials) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
+  }
 
   const status = run?.status ?? 'error';
   const { findings, inline, progress, structured } = collect(stateDir);
@@ -178,13 +188,9 @@ export async function publish({ env = process.env, stateDir }) {
     if (structuredErrors.length) errors.push(`Structured output invalid: ${structuredErrors.slice(0, 5).join('; ')}`);
   }
 
-  // git
-  let branch = null;
-  try {
-    ({ branch } = await commitChanges({ github, inputs, context, workDir, reportDir }));
-  } catch (err) {
-    errors.push(`Could not commit the changes: ${err.message}`);
-    core.warning(`Could not commit the changes: ${err.message}`);
+  if (commitError) {
+    errors.push(`Could not commit the changes: ${commitError.message}`);
+    core.warning(`Could not commit the changes: ${commitError.message}`);
   }
 
   // open_pr

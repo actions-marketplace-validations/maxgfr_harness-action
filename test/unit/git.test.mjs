@@ -114,6 +114,28 @@ test('a symbolic link is never followed: its target is not read, the link is rep
   assert.match(only.patch, /hosts/);
 });
 
+test('git configuration written by the agent runs nothing in the publish step', async () => {
+  const { tmp, repo, base } = makeRepo();
+  const ran = (name) => fs.existsSync(path.join(tmp, `ran-${name}`));
+  const script = (name) => {
+    const file = path.join(tmp, `${name}.sh`);
+    fs.writeFileSync(file, `#!/bin/sh\ntouch "${path.join(tmp, `ran-${name}`)}"\ncat 2>/dev/null\nexit 0\n`, { mode: 0o755 });
+    return file;
+  };
+  g(repo, 'config', 'core.fsmonitor', script('fsmonitor'));
+  g(repo, 'config', 'diff.external', script('extdiff'));
+  g(repo, 'config', 'filter.evil.clean', script('filter'));
+  g(repo, 'config', 'filter.evil.required', 'true');
+  fs.copyFileSync(script('hook'), path.join(repo, '.git', 'hooks', 'post-index-change'));
+  fs.chmodSync(path.join(repo, '.git', 'hooks', 'post-index-change'), 0o755);
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil\n');
+  fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nchanged\n');
+  const { github, patch } = await commit(repo, base);
+  assert.deepEqual(['fsmonitor', 'extdiff', 'filter', 'hook'].filter(ran), []);
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path).sort(), ['.gitattributes', 'README.md']);
+  assert.match(patch, /\+changed/);
+});
+
 test('an unchanged tree commits nothing', async () => {
   const { repo, base } = makeRepo();
   const { branch, github, patch } = await commit(repo, base);
