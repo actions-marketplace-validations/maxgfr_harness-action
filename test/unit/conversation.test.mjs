@@ -11,8 +11,8 @@ import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
 import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
-import { feedbackPrompt, TURN_MARKER, runCheck } from '../../src/stages/run.mjs';
-import { previousReply } from '../../src/stages/prepare.mjs';
+import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId } from '../../src/stages/run.mjs';
+import { previousReply, conversationBranch } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
 import { loopLine, finalBody } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
@@ -138,6 +138,9 @@ test('a conversation is restored from the newest artifact of its name', async ()
   gh.addArtifact('harness-session-v1-pi-issue-7', zipOf('old', 'a.zip'));
   gh.addArtifact('harness-session-v1-pi-issue-7', zipOf('new', 'b.zip'));
   gh.addArtifact('harness-session-v1-pi-issue-8', zipOf('other', 'c.zip'));
+  // newer, but uploaded by the workflow run of a fork's pull request: never restored
+  gh.addArtifact('harness-session-v1-pi-issue-7', zipOf('forged', 'd.zip'), { headRepositoryId: 666 });
+  gh.addArtifact('harness-session-v1-pi-issue-5', zipOf('forged', 'e.zip'), { headRepositoryId: 666 });
   const port = await new Promise((r) => gh.server.listen(0, '127.0.0.1', () => r(gh.server.address().port)));
   const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}` });
   const dir = path.join(tmp, 'restored');
@@ -147,7 +150,25 @@ test('a conversation is restored from the newest artifact of its name', async ()
   const miss = await restoreSessionArtifact({ github, owner: 'acme', repo: 'demo', name: 'harness-session-v1-pi-issue-99', dir: path.join(tmp, 'none'), tmpDir: tmp });
   assert.equal(miss.restored, false);
   assert.match(miss.reason, /no saved conversation/);
+  const forged = await restoreSessionArtifact({ github, owner: 'acme', repo: 'demo', name: 'harness-session-v1-pi-issue-5', dir: path.join(tmp, 'forged'), tmpDir: tmp });
+  assert.equal(forged.restored, false);
+  assert.match(forged.reason, /fork/);
+  assert.ok(!fs.existsSync(path.join(tmp, 'forged', 'meta.json')));
   gh.server.close();
+});
+
+test('a restored conversation cannot redirect the next commit or smuggle an option', () => {
+  const rules = { defaultBranch: 'main', baseBranch: 'develop', prefix: 'harness/', template: '' };
+  assert.equal(conversationBranch('harness/issue-7-20261103-1020', rules), 'harness/issue-7-20261103-1020');
+  for (const forged of ['main', 'develop', 'release/1.x', '-harness/x', 'harness/../main', '', null, { name: 'x' }, 'harness/a b']) {
+    assert.equal(conversationBranch(forged, rules), '', String(forged));
+  }
+  // with a template, names are free-form, but still never the default or the base branch
+  assert.equal(conversationBranch('bot/7-fix', { ...rules, template: '{{prefix}}{{entityNumber}}' }), 'bot/7-fix');
+  assert.equal(conversationBranch('main', { ...rules, template: '{{prefix}}{{entityNumber}}' }), '');
+
+  for (const id of ['ses_e5d6a41bcffepJ2LxAIWthnIXQ', '01a1a28d-8997-7542-a505-0603a69549ec']) assert.ok(isSessionId(id), id);
+  for (const id of ['--config=/tmp/x', '-s', 'a b', 'a/../b', '', null, 42]) assert.ok(!isSessionId(id), String(id));
 });
 
 test('mock LLM counts turns across loop iterations and resumed sessions', () => {

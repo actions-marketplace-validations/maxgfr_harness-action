@@ -27,6 +27,19 @@ export function previousReply(body) {
     .trim();
 }
 
+/**
+ * The branch a restored conversation asks to continue on, or '' when it is not one this action
+ * would have created. The value comes from a saved artifact: it is never allowed to point the
+ * next commit at the default branch, at `base_branch`, or (unless a `branch_name_template`
+ * makes names free-form) outside `branch_prefix`.
+ */
+export function conversationBranch(branch, { defaultBranch = '', baseBranch = '', prefix = '', template = '' } = {}) {
+  if (typeof branch !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) || branch.includes('..')) return '';
+  if (branch === defaultBranch || branch === baseBranch) return '';
+  if (!template && prefix && !branch.startsWith(prefix)) return '';
+  return branch;
+}
+
 async function buildThread({ github, ctx, inputs, isPR, currentCommentId }) {
   const { owner, repo, number } = ctx;
   const entity = isPR ? await github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? (await github.get(`/repos/${owner}/${repo}/issues/${number}`));
@@ -163,6 +176,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
         else core.warning(`Saved conversation: ${r.reason}.`);
       }
       try { savedBranch = JSON.parse(fs.readFileSync(path.join(sessionDir, 'meta.json'), 'utf8')).branch ?? ''; } catch {}
+      const trusted = conversationBranch(savedBranch, { defaultBranch: ctx.defaultBranch, baseBranch: inputs.baseBranch, prefix: inputs.branchPrefix, template: inputs.branchNameTemplate });
+      if (savedBranch && !trusted) core.warning(`The saved conversation names the branch "${truncate(String(savedBranch), 100)}", which is not a branch this action creates: starting a new one.`);
+      savedBranch = trusted;
     }
 
     // Commit target decided now, so the right branch is checked out before credentials go away.
@@ -184,6 +200,11 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     }
     if (commitMode === 'pr-branch' && (!pr || pr.isFork)) {
       core.warning(pr?.isFork ? 'The pull request comes from a fork: changes cannot be pushed to it; they are saved as a patch.' : 'commit_mode pr-branch needs a pull request; changes are saved as a patch.');
+      commitMode = 'none';
+    }
+    // The action never commits to the default branch, even when it is the head of a pull request.
+    if (commitMode === 'pr-branch' && ctx.defaultBranch && pr.headRef === ctx.defaultBranch) {
+      core.warning(`The head of this pull request is the default branch (${pr.headRef}): the action does not commit to it; changes are saved as a patch.`);
       commitMode = 'none';
     }
     const repoOk = isRepo(workDir);

@@ -18,6 +18,9 @@ import { truncate } from '../util.mjs';
 const MAX_ARGV_PROMPT = 100_000; // Linux caps one argv string at 128 KiB
 export const TURN_MARKER = '<!-- harness-turn -->';
 
+/** A harness session / thread id as the four harnesses write them (`ses_…`, a UUID). */
+export const isSessionId = (id) => typeof id === 'string' && /^[A-Za-z0-9][\w.-]{0,127}$/.test(id);
+
 /** Runs the completion check. Never throws. */
 export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
   return new Promise((resolve) => {
@@ -88,6 +91,9 @@ export async function run({ stateDir, env = process.env }) {
     try { saved = JSON.parse(fs.readFileSync(meta, 'utf8')); } catch {}
     if (saved && saved.harness === (plan.adapterId ?? plan.harness)) {
       sessionId = await adapter.importSession({ ...helper, dir: session.dir }).catch(() => null);
+      // The id comes from the saved conversation and goes on the harness command line: an id,
+      // never something a CLI would read as an option.
+      if (!isSessionId(sessionId)) sessionId = null;
       resumed = Boolean(sessionId);
       core.info(resumed ? `↺ Resuming the conversation (session ${sessionId}, ${saved.turns ?? '?'} earlier turn(s)).` : 'A saved conversation was found but could not be restored: starting a new session.');
     } else if (saved) {

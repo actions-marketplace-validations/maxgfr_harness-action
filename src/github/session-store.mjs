@@ -18,7 +18,17 @@ function unzip(file, dir) {
 }
 
 /**
- * Restores the newest artifact called `name` into `dir`.
+ * Anyone who can open a pull request can upload an artifact with any name: the workflow of a
+ * fork's pull request runs in this repository. A conversation is only taken from a run whose
+ * code came from this repository, never from a fork's.
+ */
+const fromThisRepository = (artifact) => {
+  const run = artifact.workflow_run;
+  return Boolean(run?.repository_id) && run.head_repository_id === run.repository_id;
+};
+
+/**
+ * Restores the newest artifact called `name`, saved by a run of this repository, into `dir`.
  * @returns {{ restored: boolean, reason: string, artifact?: object }}
  */
 export async function restoreSessionArtifact({ github, owner, repo, name, dir, tmpDir }) {
@@ -31,10 +41,13 @@ export async function restoreSessionArtifact({ github, owner, repo, name, dir, t
     }
     throw err;
   }
-  const artifact = (list?.artifacts ?? [])
-    .filter((a) => a.name === name && !a.expired)
-    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-  if (!artifact) return { restored: false, reason: 'no saved conversation yet' };
+  const named = (list?.artifacts ?? []).filter((a) => a.name === name && !a.expired);
+  const artifact = named.filter(fromThisRepository).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+  if (!artifact) {
+    return named.length
+      ? { restored: false, reason: `ignored ${named.length} artifact(s) named ${name}: uploaded by a workflow run of another repository (a fork)` }
+      : { restored: false, reason: 'no saved conversation yet' };
+  }
   const zip = await github.request('GET', artifact.archive_download_url, undefined, { binary: true });
   const file = path.join(tmpDir, 'session.zip');
   fs.writeFileSync(file, zip);
