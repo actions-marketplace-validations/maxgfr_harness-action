@@ -74,6 +74,8 @@ test('openclaw config: tool search off, permissions as deny lists, env-reference
   assert.deepEqual(ro.secrets.providers.env, { source: 'env' });
   assert.deepEqual(ro.skills.load.extraDirs, ['/h/.agents/skills']);
   assert.equal(ro.agents.defaults.workspace, '/w');
+  assert.equal(ro.agents.defaults.skipBootstrap, true); // no AGENTS.md / SOUL.md / … seeded into the checkout
+  assert.equal(openclawConfig({ ...base, endpoint: resolveEndpoint({ provider: 'mock', baseUrl: 'http://x/v1' }), perms: permissionProfile('read-only'), harnessConfig: { agents: { defaults: { skipBootstrap: false } } } }).agents.defaults.skipBootstrap, false); // harness_config can bring it back
   assert.deepEqual(ro.mcp.servers.harness, { command: 'node', args: ['s.mjs'], env: { A: '1' } });
   const full = openclawConfig({ ...base, model: { provider: 'anthropic', id: 'claude-haiku-5-5' }, endpoint: resolveEndpoint({ provider: 'anthropic' }), perms: permissionProfile('full') });
   assert.ok(!full.tools.deny.includes('exec'));
