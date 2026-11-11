@@ -14,17 +14,34 @@ The action is three steps:
 
 On top of that:
 
-- **Persisted checkout credentials are removed for the run.** This covers the extraheader in `.git/config` and the credentials file `actions/checkout` v6+ keeps under `$RUNNER_TEMP`. They are recreated in Publish with `github_token`.
+- **The agent runs as its own user** whenever it can run code (see below).
+- **Persisted checkout credentials are removed for the run.** This covers the extraheader in `.git/config` and in the configuration of every submodule, and the credentials file `actions/checkout` v6+ keeps under `$RUNNER_TEMP`. They are recreated in Publish with `github_token`, after the agent's processes are gone, and never through a symbolic link.
 - **The agent cannot push.** It edits files; the action commits them with `createCommitOnBranch` (signed by GitHub) to the branch it chose (`commit_mode`), never to the default branch. Changes to `.github/workflows/` are left out of the commit with the job token, which GitHub never lets change workflows: they stay in `changes.patch` and the reply lists them. Only a GitHub App token with the *workflows* permission, passed as `github_token`, can commit them; think twice before granting it, since a workflow runs with the repository's secrets.
 - **Publish does not trust the working tree.** Only regular files are committed: a symbolic link is never followed (it is listed in the reply and kept in `changes.patch`). The git commands Publish runs there ignore the repository's hooks, `core.fsmonitor`, filter drivers and external diff programs, and the checkout credentials come back only after them. `json_schema` given as a file is the one read before the run.
 - **The MCP server holds no token.** Write tools append to an outbox file; read tools serve files fetched in Prepare.
-- **Install scripts get no token.** `npm install` of the harness runs with the same scrubbed environment.
+- **Install scripts get no token.** The harness is installed with the same scrubbed environment, with `npm ci` from a lockfile shipped with each release (`src/harness/locks`): every package it depends on is pinned with its integrity hash. A `harness_version` other than the pinned one is resolved at install time instead.
 - The run uses an **isolated `$HOME`**, so the harness does not see the runner's `~/.gitconfig`, `~/.npmrc`, `~/.docker`, etc.
+
+## The agent's own user
+
+Scrubbing the environment keeps the token out of the agent's reach only if the agent cannot reach the steps that hold it. Without more, the three steps run as the same user, so code the agent runs (a shell command, or the `loop_until` check, which executes what the agent wrote) could rewrite the action's files or the state Publish reads, read the environment of the token-holding steps through `/proc`, or leave a process behind that waits for Publish to restore the credentials.
+
+So with `sandbox: auto` (the default), whenever the agent can run code (`tools: full`, an `allow_bash` list, or `loop_until`) and the runner allows it, the whole Run step (harness, MCP server, completion check) runs as a dedicated system user, `harness-agent`:
+
+- it can write the working tree, its own home and the directories the Run step writes to, nothing else of the runner's;
+- the files Prepare wrote (`plan.json`, `context.json`, the prompts) are the runner's, in a sticky directory: the agent can read them but not replace them;
+- it cannot read the environment of the runner's processes, nor write the action's files;
+- every one of its processes is killed at the end of the Run step, and again before Publish restores credentials;
+- Publish takes its files back (owner, no symbolic link in the directories it uploads) before it uses them.
+
+This needs Linux and passwordless `sudo`, which GitHub-hosted runners have; the action creates the user, makes the directories above the workspace traversable (`o+x`), and makes the workspace writable for it. On a runner that cannot (macOS, Windows, a container already running as root, no `sudo`), `auto` warns and runs the agent as the job's user; `sandbox: on` fails instead, and `sandbox: off` never isolates. As the agent's user, a command cannot use what belongs to the job's user: the Docker socket, `sudo`, files under `$HOME` that are not world-readable.
+
+When the action is used from the workspace itself (`uses: ./`), its files are part of the working tree the agent may write: use a published version (`owner/harness-action@v2`) for the isolation to cover them.
 
 ## What the agent can still reach
 
 - **Your provider API key.** The harness needs it to call the model. With `tools: full` (shell and network), a steered agent could send it somewhere. Use a key with a spending limit, and prefer `read-only` / `edit` with an `allow_bash` list.
-- **The workspace and the runner filesystem**, read-only or not, depending on the harness. Do not put secrets on disk before the action runs.
+- **The workspace and whatever else on the runner is world-readable.** Do not put secrets on disk before the action runs.
 - **Network access**, depending on the harness and the level: OpenCode `webfetch` and the Codex sandbox network are off below `full`. A shell command can still reach the network when bash is allowed.
 
 ## Conversations (the session cache)
@@ -45,7 +62,9 @@ The restored session is read by the run step only, which has no token. The agent
 
 ## Who can trigger it
 
-In tag mode, and for comment events, the actor must have **write** access to the repository. Bots are refused unless listed in `allowed_bots`. The action's hidden comment markers only count on comments written by its own token: pasting one into a comment does not make it the agent's earlier reply. `allowed_non_write_users` opens the agent to anyone you list (`*` = everyone): only do that with `tools: read-only` and no `commit_mode`.
+In tag mode, and for comment events, the actor must have **write** access to the repository. Bots are refused unless listed in `allowed_bots`. The action's hidden comment markers only count on comments written by its own token: pasting one into a comment does not make it the agent's earlier reply. On an `edited` event, the author of the edited text must pass the same check as the person who edited it: a maintainer fixing a typo in a stranger's request does not run it with the maintainer's rights. `allowed_non_write_users` opens the agent to anyone you list (`*` = everyone): only do that with `tools: read-only` and no `commit_mode`.
+
+A question asked in a comment on a pull request from a fork is answered from the base branch and the pull request's diff: the fork's code is not checked out next to the provider keys. A pull request from the same repository is checked out.
 
 ## Recommendations
 

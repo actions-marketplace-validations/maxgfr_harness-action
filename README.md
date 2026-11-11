@@ -21,7 +21,7 @@ And you can **talk to it like you talk to your local coding agent**: ask it a qu
 - **Any model.** Anthropic, OpenAI, OpenRouter, Groq, DeepSeek, Mistral, xAI, Gemini, Ollama, or any OpenAI-compatible endpoint (`base_url`).
 - **Any harness.** Pick the agent loop that suits the model: OpenCode (default), Codex, Pi or OpenClaw.
 - **Any skill.** Install skills from any repository (`owner/repo@ref#skill`), or use the ones committed in yours (`.agents/`, `.claude/`, `.opencode/`, `.codex/`, `.pi/`, `.openclaw/skills`). Each harness gets them at its own discovery path.
-- **The token never reaches the agent.** The run happens in a step that has no GitHub token. Persisted checkout credentials are removed for that step. Comments, reviews and commits are replayed afterwards by deterministic code (see [Security](docs/security.md)).
+- **The token never reaches the agent.** The run happens in a step that has no GitHub token, as its own system user when the agent can run code, so that it cannot reach the steps that hold the token. Persisted checkout credentials are removed for that step. Comments, reviews and commits are replayed afterwards by deterministic code (see [Security](docs/security.md)).
 - **One output contract.** Every harness reports the same way: findings become annotations, SARIF and a gate (`fail_on`); `json_schema` gives a validated `structured_output`; plus a job summary, a sticky comment and a report artifact.
 
 ## Quick start
@@ -230,6 +230,7 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 | `fail_on` · `on_agent_error` | — · `warn` | gates |
 | `max_steps` · `timeout_minutes` · `budget_usd` | `200` · `30` · — | limits of an unattended run |
 | `harness_args` · `harness_config` · `mcp_config` | — | escape hatches |
+| `sandbox` | `auto` | run the agent as its own system user when it can run code (`on`, `off`); see [Security](docs/security.md) |
 
 **Outputs:** `conclusion`, `mode`, `structured_output`, `findings_count`, `branch_name`, `pr_number`, `pr_url`, `session_id`, `resumed`, `iterations`, `cost_usd`, `execution_file`, `report_dir`.
 
