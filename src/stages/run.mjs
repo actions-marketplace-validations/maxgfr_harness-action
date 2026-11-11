@@ -83,7 +83,14 @@ export async function run({ stateDir, env = process.env }) {
 
   // `$env:NAME` values are references to the job environment, resolved only now.
   const planEnv = Object.fromEntries(Object.entries(plan.env ?? {}).map(([k, v]) => [k, typeof v === 'string' && v.startsWith('$env:') ? env[v.slice(5)] ?? '' : v]));
+  // A temp directory the agent's user can write to: $RUNNER_TEMP and the runner's $TMPDIR belong
+  // to the job's user, so without this every tool of the agent (and `loop_until`) that writes a
+  // temporary file fails. (Before `planEnv`: a harness that sets its own TMPDIR keeps it.)
+  const agentTmp = path.join(plan.home, 'tmp');
+  fs.mkdirSync(agentTmp, { recursive: true });
+  const tmpEnv = { TMPDIR: agentTmp, TEMP: agentTmp, TMP: agentTmp };
   const childEnv = sanitizedEnv(env, {
+    ...tmpEnv,
     ...planEnv,
     HOME: plan.home,
     PWD: plan.workDir, // opencode resolves its project from $PWD, not from the process cwd
@@ -179,7 +186,7 @@ export async function run({ stateDir, env = process.env }) {
       let check = null;
       if (loop.until) {
         core.info(`✓? completion check: ${loop.until}`);
-        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env) });
+        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env, tmpEnv) });
         it.check = { code: r.code };
         core.info(r.code === 0 ? '   passed' : `   failed (exit ${r.code})`);
         if (r.code === 0) { loopResult = 'passed'; break; }

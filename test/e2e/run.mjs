@@ -378,11 +378,14 @@ async function sandboxScenario(harness) {
   const withInputs = { ...baseEnv, HARNESS_INPUTS: JSON.stringify(inputs) };
   const resolveRes = await step('resolve', withInputs);
   const stateDir = resolveRes.outputs.state_dir;
+  const tmpProbe = path.join(stateDir, 'tmp-probe.txt'); // (the state directory: the agent may add files there)
   fs.writeFileSync(attackFile, [
+    // what any `loop_until` needs: a temp directory it can write to
+    `printf "$TMPDIR" > ${tmpProbe} && printf x > "$TMPDIR/probe" && printf ok >> ${tmpProbe}`,
     `touch ${probe}`,
     `printf tampered > ${path.join(stateDir, 'context.json')}`,
     `rm -f ${path.join(stateDir, 'plan.json')}`,
-    `cat ${cred} > ${stolen}`,
+    `cat ${cred} > ${stolen}`, // (refused: the credentials are gone for the run, and this path is the runner's)
     // left behind, to read the credentials once Publish has put them back
     `(setsid sh -c 'sleep 20; cat ${cred} > ${stolen}' > /dev/null 2>&1 &)`,
   ].map((c) => `${c} 2>/dev/null`).join('\n') + '\nexit 0\n');
@@ -407,6 +410,11 @@ async function sandboxScenario(harness) {
     ['context.json and plan.json could not be replaced', contextKept],
     ['no agent process outlived the run step', !agentAlive],
     ['the agent still did its work', commits.at(-1)?.includes('ECHO.md')],
+    ['the completion check has a temp directory it can write', (() => {
+      const seen = fs.existsSync(tmpProbe) ? fs.readFileSync(tmpProbe, 'utf8') : '';
+      if (!seen.endsWith('ok')) console.log(`   (TMPDIR for the check: ${seen || '(nothing)'})`);
+      return seen.endsWith('ok');
+    })()],
     ['its files are the runner\'s again', fs.existsSync(path.join(workspace, 'ECHO.md')) && ownedByRunner(path.join(workspace, 'ECHO.md')) && ownedByRunner(stateDir)],
     ['its user is gone after publish', Boolean(agentUser) && spawnSync('id', ['-u', agentUser]).status !== 0],
     ['the working tree has its modes back', (fs.statSync(path.join(workspace, 'README.md')).mode & 0o777) === 0o644],

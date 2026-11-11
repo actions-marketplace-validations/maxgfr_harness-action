@@ -71,10 +71,12 @@ jobs:
       - name: Completion check with a token only its output reveals
         if: steps.m.outputs.model != ''
         run: |
+          # written here, by the job's user: the check runs as the agent's user, which can read
+          # $RUNNER_TEMP but not write to it
+          openssl rand -hex 4 > "$RUNNER_TEMP/loop-token"
+          chmod 644 "$RUNNER_TEMP/loop-token"
           cat > "$RUNNER_TEMP/loop-check.sh" <<'EOF'
-          f="$RUNNER_TEMP/loop-token"
-          [ -f "$f" ] || openssl rand -hex 4 > "$f"
-          t="token-$(cat "$f")"
+          t="token-$(cat "$RUNNER_TEMP/loop-token")"
           grep -qx 'harness-loop-ok' LOOP.md 2>/dev/null && grep -qx "$t" LOOP.md && exit 0
           echo "FAILED: LOOP.md must contain the line harness-loop-ok AND the line $t"
           exit 1
