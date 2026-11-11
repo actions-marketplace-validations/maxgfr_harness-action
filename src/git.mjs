@@ -133,21 +133,46 @@ export function treeChanges(cwd, base = 'HEAD') {
 // ---------------------------------------------------------------------------------------------
 const HEADER_KEY_RE = /^http\.(.+)\.extraheader$/i;
 
+/**
+ * The configuration file of the repository and of every submodule under its git directory
+ * (`.git/modules/…`, nested ones included): `actions/checkout` up to v5 writes the token into
+ * each of them when it checks submodules out.
+ */
+function configFiles(cwd) {
+  const gitDir = tryGit(['rev-parse', '--absolute-git-dir'], cwd)?.trim();
+  if (!gitDir) return [];
+  const files = [];
+  const walk = (dir, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    const isGitDir = entries.some((e) => e.isFile() && e.name === 'HEAD');
+    if (isGitDir && entries.some((e) => e.isFile() && e.name === 'config')) files.push(path.join(dir, 'config'));
+    if (depth >= 8) return;
+    // inside a git directory only `modules` holds more of them; above one (a submodule named
+    // `libs/foo` lives in modules/libs/foo), any directory may
+    for (const e of entries) if (e.isDirectory() && (!isGitDir || e.name === 'modules')) walk(path.join(dir, e.name), depth + 1);
+  };
+  walk(gitDir, 0);
+  return files;
+}
+
 export function stripCredentials(cwd) {
   const removed = { headers: [], includes: [] };
-  const list = tryGit(['config', '--local', '--list', '--name-only'], cwd) ?? '';
-  for (const key of new Set(list.split('\n').filter(Boolean))) {
-    if (HEADER_KEY_RE.test(key)) {
-      removed.headers.push(key.toLowerCase());
-      tryGit(['config', '--local', '--unset-all', key], cwd);
-    } else if (/^includeif\..*\.path$/i.test(key)) {
-      for (const p of (tryGit(['config', '--local', '--get-all', key], cwd) ?? '').split('\n').filter(Boolean)) {
-        const file = path.isAbsolute(p) ? p : path.join(cwd, '.git', p);
-        let text = '';
-        try { text = fs.readFileSync(file, 'utf8'); } catch {}
-        if (/extraheader/i.test(text)) {
-          removed.includes.push({ key, file });
-          fs.writeFileSync(file, '# credentials removed by harness-action for the agent run\n');
+  for (const config of configFiles(cwd)) {
+    const cfg = (args) => tryGit(['config', '--file', config, ...args], cwd);
+    for (const key of new Set((cfg(['--list', '--name-only']) ?? '').split('\n').filter(Boolean))) {
+      if (HEADER_KEY_RE.test(key)) {
+        removed.headers.push({ file: config, key: key.toLowerCase() });
+        cfg(['--unset-all', key]);
+      } else if (/^includeif\..*\.path$/i.test(key)) {
+        for (const p of (cfg(['--get-all', key]) ?? '').split('\n').filter(Boolean)) {
+          const file = path.isAbsolute(p) ? p : path.join(path.dirname(config), p);
+          let text = '';
+          try { text = fs.readFileSync(file, 'utf8'); } catch {}
+          if (/extraheader/i.test(text)) {
+            removed.includes.push({ key, file });
+            fs.writeFileSync(file, '# credentials removed by harness-action for the agent run\n');
+          }
         }
       }
     }
@@ -158,8 +183,12 @@ export function stripCredentials(cwd) {
 export function restoreCredentials(cwd, removed, token, serverUrl = 'https://github.com') {
   if (!removed || !token) return;
   const value = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
-  for (const key of removed.headers ?? []) tryGit(['config', '--local', key, value], cwd);
+  // The agent had the checkout: a config file it replaced with a link would make the token land
+  // wherever the link points. Only regular files get it back.
+  const regular = (file) => { try { return fs.lstatSync(file).isFile(); } catch { return false; } };
+  for (const { file, key } of removed.headers ?? []) if (regular(file)) tryGit(['config', '--file', file, key, value], cwd);
   for (const { file } of removed.includes ?? []) {
+    if (fs.existsSync(file) && !regular(file)) continue;
     fs.writeFileSync(file, `[http "${serverUrl.replace(/\/$/, '')}/"]\n\textraheader = ${value}\n`);
   }
 }

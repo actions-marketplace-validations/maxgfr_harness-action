@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { commitChanges } from '../../src/stages/publish.mjs';
-import { commitViaApi } from '../../src/git.mjs';
+import { commitViaApi, stripCredentials, restoreCredentials } from '../../src/git.mjs';
 import { finalBody } from '../../src/publish/render.mjs';
 import { inputs, g, commitAll, makeRepo, runPublish } from './helpers.mjs';
 
@@ -206,6 +206,39 @@ test('.openclaw/skills is part of the repository, the rest of .openclaw is harne
   fs.mkdirSync(path.join(second.repo, '.openclaw'));
   fs.writeFileSync(path.join(second.repo, '.openclaw', 'workspace.json'), '{}');
   assert.equal((await commit(second.repo, second.base)).branch, null);
+});
+
+test('checkout credentials are removed from the repository and from every submodule, then put back', () => {
+  const { repo } = makeRepo();
+  const header = 'http.https://github.com/.extraheader';
+  const secret = 'AUTHORIZATION: basic c2VjcmV0';
+  // what `actions/checkout` (up to v5) with `submodules: recursive` leaves behind
+  const modules = ['libs/core', 'libs/core/modules/nested', 'docs'].map((name) => path.join(repo, '.git', 'modules', name));
+  for (const dir of modules) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'HEAD'), 'ref: refs/heads/main\n');
+    g(repo, 'config', '--file', path.join(dir, 'config'), header, secret);
+  }
+  g(repo, 'config', '--local', header, secret);
+  const configs = [path.join(repo, '.git', 'config'), ...modules.map((d) => path.join(d, 'config'))];
+  const leaked = () => configs.filter((f) => fs.readFileSync(f, 'utf8').includes('c2VjcmV0'));
+
+  const removed = stripCredentials(repo);
+  assert.deepEqual(leaked(), []);
+  assert.deepEqual(removed.headers.map((h) => h.file).sort(), [...configs].sort());
+
+  restoreCredentials(repo, removed, 'ghs_newtoken');
+  const expected = `AUTHORIZATION: basic ${Buffer.from('x-access-token:ghs_newtoken').toString('base64')}`;
+  for (const f of configs) assert.equal(g(repo, 'config', '--file', f, '--get', header), expected, f);
+
+  // a config the agent swapped for a link does not receive the token
+  const again = stripCredentials(repo);
+  const decoy = path.join(repo, 'decoy.txt');
+  fs.writeFileSync(decoy, '');
+  fs.rmSync(configs[1]);
+  fs.symlinkSync(decoy, configs[1]);
+  restoreCredentials(repo, again, 'ghs_newtoken');
+  assert.equal(fs.readFileSync(decoy, 'utf8'), '');
 });
 
 test('an unchanged tree commits nothing', async () => {
