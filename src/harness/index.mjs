@@ -23,6 +23,10 @@ const ADAPTERS = { opencode, codex, pi, openclaw };
 /** The harnesses the `harness` input accepts. */
 export const HARNESS_IDS = Object.keys(ADAPTERS);
 
+/**
+ * Every adapter can resume a session (`importSession` / `exportSession`, and a `sessionId` in
+ * `command`): the loop and the conversations rely on it.
+ */
 export function getAdapter(id) {
   const a = ADAPTERS[id];
   if (!a) throw new Error(`Unknown harness "${id}" (expected one of ${HARNESS_IDS.join(', ')})`);

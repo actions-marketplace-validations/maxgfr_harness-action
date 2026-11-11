@@ -7,15 +7,20 @@ import { readInputs, effectiveTools, splitModel, loopSettings, sessionThread, se
 import { restoreSessionArtifact } from '../github/session-store.mjs';
 import { readContext } from '../github/context.mjs';
 import { createClient } from '../github/api.mjs';
-import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, classifyIntent } from '../modes.mjs';
+import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, intentFor } from '../modes.mjs';
 import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../harness/index.mjs';
 import { resolveEndpoint } from '../harness/providers.mjs';
-import { installSkills } from '../skills.mjs';
+import { installSkills, repositorySkillNames } from '../skills.mjs';
 import { buildPrompt, buildFollowupPrompt } from '../prompt.mjs';
-import { git, isRepo, headSha, stripCredentials } from '../git.mjs';
+import { git, isRepo, headSha, stripCredentials, restoreCredentials, repoRoot, privateGitDir, snapshotGit } from '../git.mjs';
+import { sandboxDecision, setupSandbox, isInside } from '../sandbox.mjs';
+import { fileURLToPath } from 'node:url';
+
+const ACTION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 import { TRACKING_MARKER, stickyMarker, workingBody } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 import { toolDefinitions } from '../mcp/server.mjs';
+import { uncheckedKeywords } from '../contract.mjs';
 
 const MAX_DIFF = 2 * 1024 * 1024;
 
@@ -107,7 +112,8 @@ export function ownComments(github) {
  */
 export function commentLister(github, ctx) {
   let list = null;
-  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500 }));
+  // (in a thread longer than that, the newest comments: the event says how many there are)
+  return () => (list ??= github.paginate(`/repos/${ctx.owner}/${ctx.repo}/issues/${ctx.number}/comments`, { max: 500, total: ctx.entity?.comments ?? 0 }));
 }
 
 export async function buildThread({ github, ctx, inputs, isPR, currentCommentId, own, listComments = commentLister(github, ctx) }) {
@@ -116,7 +122,7 @@ export async function buildThread({ github, ctx, inputs, isPR, currentCommentId,
   const [entity, comments, reviews] = await Promise.all([
     isPR ? github.get(`/repos/${owner}/${repo}/pulls/${number}`) : ctx.entity ?? github.get(`/repos/${owner}/${repo}/issues/${number}`),
     listComments(),
-    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300 }) : [],
+    isPR ? github.paginate(`/repos/${owner}/${repo}/pulls/${number}/comments`, { max: 300, total: ctx.payload?.pull_request?.review_comments ?? 0 }) : [],
   ]);
   const L = [`# ${isPR ? 'Pull request' : 'Issue'} #${number}: ${entity.title}`, '', `_opened by @${entity.user?.login} · state ${entity.state}_`, '', entity.body || '_(no description)_'];
   const mine = await own(comments);
@@ -151,6 +157,21 @@ async function ciStatus(github, ctx, sha) {
   }
 }
 
+/** Throws on what the inputs alone show cannot work. */
+export function validateRun({ adapter, model, endpoint }) {
+  adapter.validate?.({ model, endpoint });
+}
+
+/**
+ * The skill to use must exist before anything is installed. Called once the branch the agent
+ * works on is checked out: a pull request may be the one that adds the skill.
+ */
+export function checkSkillAvailable({ inputs, workDir }) {
+  if (inputs.skill && !inputs.skills.length && !repositorySkillNames(workDir).includes(inputs.skill)) {
+    throw new Error(`Input skill "${inputs.skill}" is not installed: no \`skills\` source is given and the repository has no skill of that name (in ${['.agents', '.claude', '.opencode', '.codex', '.pi', '.openclaw'].map((d) => `${d}/skills`).join(', ')})`);
+  }
+}
+
 export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const inputs = readInputs(env);
   const ctx = readContext(env);
@@ -171,27 +192,34 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   if (!inputs.model) throw new Error('Input required and not supplied: model (provider/model, e.g. anthropic/claude-sonnet-5-5)');
 
   const github = createClient({ token: inputs.githubToken });
-  const access = await checkAccess(ctx, inputs, modeInfo.mode, github);
+  const access = await checkAccess(ctx, inputs, modeInfo.mode, github, { author: modeInfo.author });
   if (!access.allowed) {
     core.notice(`harness-action: not running — ${access.reason}.`);
     save('context.json', { ...base, run: false, mode: 'skip', reason: access.reason });
     return { run: false, mode: 'skip' };
   }
   core.info(`Mode: ${modeInfo.mode} (${modeInfo.reason}); ${access.reason}.`);
+  const unchecked = inputs.jsonSchema ? uncheckedKeywords(inputs.jsonSchema) : [];
+  if (unchecked.length) core.warning(`json_schema uses keywords this action does not validate: ${unchecked.join(', ')}. The structured output is checked against the rest of the schema only.`);
 
   const { adapter, adapterId, meta, version } = resolveHarness(inputs.harness, inputs.harnessVersion);
   const thread0 = sessionThread(inputs, ctx, modeInfo.mode);
   // Tag mode answers questions (read-only, with recommendations) and changes code only when
   // asked to. An explicit `tools` input always wins.
-  let intent = 'do';
-  if (modeInfo.mode === 'tag' && inputs.askMode !== 'off') intent = inputs.askMode === 'always' ? 'ask' : classifyIntent(modeInfo.triggerText, inputs.triggerPhrase);
+  const intent = intentFor(modeInfo, inputs);
   const tools = intent === 'ask' && inputs.tools === 'auto' ? 'read-only' : effectiveTools(inputs.tools, modeInfo.mode);
   const loop = intent === 'ask' && tools === 'read-only' ? { maxIterations: 1, until: '' } : loopSettings(inputs);
   core.info(`Intent: ${intent === 'ask' ? 'answer (read-only, recommendations)' : 'act'} · tools: ${tools}.`);
   const perms = permissionProfile(tools, inputs.allowBash);
+  // (decided now: `sandbox: on` on a runner that cannot must fail before anything is posted)
+  const isolation = sandboxDecision({ mode: inputs.sandbox, perms, loopUntil: loop.until });
+  if (isolation.warn) core.warning(`The agent can run commands, but it runs as the job's own user: ${isolation.reason}. See docs/security.md.`);
   const model = { ...splitModel(inputs.model), raw: inputs.model };
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
   const isPR = ctx.isPR;
+  // Mistakes in the inputs are reported now, before a tracking comment is posted and the harness
+  // is installed: only what depends on a clone (a skill from `skills`) is left for later.
+  validateRun({ adapter, model, endpoint });
 
   const own = ownComments(github);
   const listComments = commentLister(github, ctx);
@@ -223,6 +251,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     }
   }
 
+  let removedCredentials = null;
+  let credentialsRoot = workDir;
   try {
     // --- pull request data + checkout of the right branch --------------------------------------
     let pr = null;
@@ -317,6 +347,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       git(['checkout', '-B', inputs.baseBranch, `origin/${inputs.baseBranch}`], workDir);
     }
 
+    checkSkillAvailable({ inputs, workDir });
     const ci = await ciStatus(github, ctx, pr?.headSha ?? ctx.sha);
     if (ci) save('ci.json', ci);
 
@@ -376,7 +407,40 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
 
 
     // --- remove persisted git credentials for the agent run --------------------------------------
-    const removedCredentials = repoOk ? stripCredentials(workDir) : null;
+    // The root of the checkout, decided now, while its git configuration is the one the job
+    // started with: Publish uses this one, never what the agent's `.git` would say then.
+    const root = repoOk ? repoRoot(workDir) : workDir;
+    removedCredentials = repoOk ? stripCredentials(workDir) : null;
+    credentialsRoot = workDir;
+    // Publish compares the working tree through a git directory of its own (the checkout's
+    // `.git` is the agent's to write).
+    const gitDir = repoOk ? privateGitDir(root, path.join(stateDir, 'git')) : null;
+
+    // --- the agent's own user -------------------------------------------------------------------
+    let sandbox = null;
+    if (isolation.enabled) {
+      const writable = [root, home, ...['codex-home', 'pi-agent', 'pi-sessions'].map((d) => path.join(stateDir, d)).filter((d) => fs.existsSync(d)), ...(thread0 ? [sessionDir] : [])];
+      if (isInside(ACTION_ROOT, root)) core.warning(`The action itself is in the working tree (${ACTION_ROOT}, e.g. \`uses: ./\`): the agent can change the code that Publish runs. Use a published version (owner/harness-action@v2) for the isolation to cover it.`);
+      try {
+        sandbox = await core.group('Agent user', () => setupSandbox({
+          // what the agent changes, and where the Run step writes
+          writable,
+          // it adds its results next to the files Prepare wrote, which it cannot replace
+          sticky: [stateDir, reportDir],
+          readable: [path.dirname(bin).replace(/\/node_modules\/\.bin$/, ''), ACTION_ROOT, process.execPath],
+          home,
+          privateDir: path.join(stateDir, 'private'),
+          gitSnapshot: repoOk ? snapshotGit(root, path.join(stateDir, 'private', 'git-snapshot')) : null,
+          log: core.info,
+        }));
+        core.info(`The agent runs as ${sandbox.user} (${isolation.reason}).`);
+      } catch (err) {
+        if (inputs.sandbox === 'on') throw new Error(`sandbox: on, but the agent's user could not be set up: ${err.message}`);
+        core.warning(`The agent's own user could not be set up (${err.message}): it runs as the job's user. See docs/security.md.`);
+      }
+    } else {
+      core.info(`The agent runs as the job's user (${isolation.reason}).`);
+    }
     if (removedCredentials?.headers.length || removedCredentials?.includes.length) core.info('Persisted git credentials removed for the agent run (restored afterwards).');
 
     // Token-free plan for the run stage.
@@ -395,6 +459,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       limits: { maxSteps: inputs.maxSteps, timeoutMinutes: inputs.timeoutMinutes, budgetUsd: inputs.budgetUsd },
       showFullOutput: inputs.showFullOutput,
       prepared: { ...prepared, files: undefined },
+      sandbox,
     });
     save('context.json', {
       ...base,
@@ -410,6 +475,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       baseHead: repoOk ? headSha(workDir) : '',
       branchName: repoOk ? (git(['rev-parse', '--abbrev-ref', 'HEAD'], workDir).trim()) : '',
       removedCredentials,
+      repoRoot: root,
+      gitDir,
       skills: skills.map((s) => ({ name: s.name, source: s.source })),
       adapterId,
       loop,
@@ -418,6 +485,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       targetBranch,
       openPr: inputs.openPr,
       jsonSchema: inputs.jsonSchema,
+      sandbox,
     });
     return {
       run: true,
@@ -430,6 +498,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
         body: `${TRACKING_MARKER}\n${sticky ?? ''}\n❌ **${inputs.harness}** could not start · [View job run](${ctx.runUrl})\n\n> ${truncate(err.message, 1000)}`,
       }).catch(() => {});
     }
+    // Credentials removed for a run that will not happen come back now: Publish has no context
+    // to restore them from.
+    if (removedCredentials) restoreCredentials(credentialsRoot, removedCredentials, inputs.githubToken, ctx.serverUrl);
     throw err;
   }
 }

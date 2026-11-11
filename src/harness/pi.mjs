@@ -15,7 +15,7 @@ export function toolList(perms) {
 export default {
   id: 'pi',
   streaming: true,
-  install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
+  install: ({ version, toolsDir, log, meta }) => npmInstall({ id: 'pi', pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare({ stateDir, model, endpoint, perms, mcpServers, harnessConfig, warn }) {
     const agentDir = path.join(stateDir, 'pi-agent');
@@ -68,7 +68,6 @@ export default {
     return { args: ['--mode', 'json', '--session-dir', prepared.sessionDir, ...(sessionId ? ['--session', sessionId] : []), ...prepared.args, ...extraArgs, prompt], stdin: null };
   },
 
-  resumable: true,
 
   async importSession({ dir, prepared }) {
     const saved = path.join(dir, 'pi-sessions');

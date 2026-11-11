@@ -6,7 +6,17 @@ import { deepMerge, isPlainObject, toToml } from '../util.mjs';
 
 const SANDBOX = { 'read-only': 'read-only', edit: 'workspace-write', full: 'danger-full-access' };
 
+/** Can codex talk to this endpoint? Throws with what to change. (Known before anything is installed.) */
+export function validateEndpoint({ endpoint }) {
+  if (!(endpoint.provider && endpoint.provider !== 'openai' || endpoint.custom)) return;
+  if (endpoint.protocol === 'anthropic') {
+    throw new Error('codex only speaks OpenAI-compatible APIs. Use an OpenAI-compatible endpoint (e.g. openrouter/anthropic/<model>) or another harness for Anthropic models.');
+  }
+  if (!endpoint.baseUrl) throw new Error(`codex does not know provider "${endpoint.provider}". Set base_url (and api_key_env) for it.`);
+}
+
 export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig, workDir }) {
+  validateEndpoint({ endpoint });
   const cfg = {
     model: model.id,
     approval_policy: 'never',
@@ -15,10 +25,6 @@ export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig,
   };
   if (perms.level === 'edit') cfg.sandbox_workspace_write = { network_access: false };
   if (endpoint.provider && endpoint.provider !== 'openai' || endpoint.custom) {
-    if (endpoint.protocol === 'anthropic') {
-      throw new Error('codex only speaks OpenAI-compatible APIs. Use an OpenAI-compatible endpoint (e.g. openrouter/anthropic/<model>) or another harness for Anthropic models.');
-    }
-    if (!endpoint.baseUrl) throw new Error(`codex does not know provider "${endpoint.provider}". Set base_url (and api_key_env) for it.`);
     const id = endpoint.custom ? 'custom' : endpoint.provider;
     cfg.model_provider = id;
     cfg.model_providers = { [id]: { name: endpoint.provider, base_url: endpoint.baseUrl, wire_api: 'responses', ...(endpoint.keyEnv ? { env_key: endpoint.keyEnv } : {}) } };
@@ -53,7 +59,8 @@ export function withUserToml(generated, user) {
 export default {
   id: 'codex',
   streaming: true,
-  install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
+  validate: validateEndpoint,
+  install: ({ version, toolsDir, log, meta }) => npmInstall({ id: 'codex', pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare(opts) {
     const cfg = buildConfig(opts);
@@ -78,7 +85,6 @@ export default {
     return { args: sessionId ? [...base, 'resume', sessionId, '-'] : [...base, '-'], stdin: prompt };
   },
 
-  resumable: true,
 
   async importSession({ dir, prepared }) {
     const saved = path.join(dir, 'codex-sessions');

@@ -18,12 +18,20 @@ export function matchesAny(value, globs) {
   return globs.some((g) => globToRegex(g).test(value));
 }
 
-/** Returns { mode, reason, triggerText } */
+/**
+ * Returns { mode, reason, triggerText } and, in tag mode:
+ *   trigger — 'mention' (the trigger phrase in a text), 'label' or 'assignee';
+ *   author  — { login, type } of whoever WROTE the text that carries a mention. On an `edited`
+ *             event that is not the person who triggered the run.
+ */
 export function detectMode(ctx, inputs) {
   const p = ctx.payload;
   const phrase = inputs.triggerPhrase;
   let triggerText = null;
   let reason = '';
+  let trigger = 'mention';
+  let author = null;
+  const by = (user) => (user?.login ? { login: user.login, type: user.type ?? '' } : null);
 
   switch (ctx.eventName) {
     case 'issue_comment':
@@ -31,25 +39,30 @@ export function detectMode(ctx, inputs) {
       if (['created', 'edited'].includes(ctx.action) && containsTrigger(p.comment?.body, phrase)) {
         triggerText = p.comment.body;
         reason = `comment mentions ${phrase}`;
+        author = by(p.comment.user);
       }
       break;
     case 'pull_request_review':
       if (ctx.action === 'submitted' && containsTrigger(p.review?.body, phrase)) {
         triggerText = p.review.body;
         reason = `review mentions ${phrase}`;
+        author = by(p.review.user);
       }
       break;
     case 'issues':
       if (ctx.action === 'assigned' && inputs.assigneeTrigger && p.assignee?.login?.toLowerCase() === inputs.assigneeTrigger.toLowerCase()) {
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `issue assigned to ${inputs.assigneeTrigger}`;
+        trigger = 'assignee';
       } else if (ctx.action === 'labeled' && inputs.labelTrigger && p.label?.name?.toLowerCase() === inputs.labelTrigger.toLowerCase()) {
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `label "${inputs.labelTrigger}" applied`;
+        trigger = 'label';
       } else if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && (containsTrigger(p.issue?.body, phrase) || containsTrigger(p.issue?.title, phrase))) {
         // (with a prompt, an issue / PR event is an automation: the body is context, not a request)
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `issue mentions ${phrase}`;
+        author = by(p.issue.user);
       }
       break;
     case 'pull_request':
@@ -57,15 +70,29 @@ export function detectMode(ctx, inputs) {
       if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && containsTrigger(p.pull_request?.body, phrase)) {
         triggerText = `${p.pull_request.title}\n\n${p.pull_request.body ?? ''}`;
         reason = `pull request mentions ${phrase}`;
+        author = by(p.pull_request.user);
       }
       break;
     default:
       break;
   }
 
-  if (triggerText !== null) return { mode: 'tag', reason, triggerText };
+  if (triggerText !== null) return { mode: 'tag', reason, triggerText, trigger, author };
   if (inputs.prompt) return { mode: 'automation', reason: 'prompt input supplied', triggerText: null };
   return { mode: 'skip', reason: `no prompt and no ${phrase} trigger in this ${ctx.eventName || 'event'}`, triggerText: null };
+}
+
+/**
+ * What a tag-mode run is asked to do: answer ('ask', read-only) or change code ('do').
+ * `ask_mode: off` always acts, `always` only answers. Otherwise a mention is read for its intent
+ * (`classifyIntent`); a label or an assignment has no sentence to read: applying it IS the
+ * request to take the issue, so it acts.
+ */
+export function intentFor(modeInfo, inputs) {
+  if (modeInfo.mode !== 'tag' || inputs.askMode === 'off') return 'do';
+  if (inputs.askMode === 'always') return 'ask';
+  if (modeInfo.trigger === 'label' || modeInfo.trigger === 'assignee') return 'do';
+  return classifyIntent(modeInfo.triggerText, inputs.triggerPhrase);
 }
 
 // Verbs that ask for a change, at the start of the request (after "please", "can you"…).
@@ -143,31 +170,44 @@ const COMMENT_EVENTS = new Set(['issue_comment', 'pull_request_review_comment', 
  * Who may wake the agent up. Anyone can comment on a public repository, so a human actor must
  * have write access unless explicitly allowed; bots must be explicitly allowed.
  */
-export async function checkAccess(ctx, inputs, mode, github) {
+export async function checkAccess(ctx, inputs, mode, github, { author = null } = {}) {
   const needsCheck = mode === 'tag' || COMMENT_EVENTS.has(ctx.eventName);
   if (!needsCheck) return { allowed: true, reason: `${ctx.eventName} is not a user-triggered event` };
-  const actor = ctx.actor;
-  const isBot = ctx.senderType === 'Bot' || /\[bot\]$/i.test(actor);
-  if (isBot) {
-    const bare = actor.replace(/\[bot\]$/i, '');
-    const ok = inputs.allowedBots.includes('*') || inputs.allowedBots.some((b) => b.replace(/\[bot\]$/i, '').toLowerCase() === bare.toLowerCase());
-    return ok ? { allowed: true, reason: `bot ${actor} is allowed` } : { allowed: false, reason: `bot ${actor} is not in allowed_bots` };
-  }
-  if (inputs.allowedNonWriteUsers.includes('*') || inputs.allowedNonWriteUsers.some((u) => u.toLowerCase() === actor.toLowerCase())) {
-    return { allowed: true, reason: `${actor} is in allowed_non_write_users` };
-  }
-  try {
-    const res = await github.get(`/repos/${ctx.owner}/${ctx.repo}/collaborators/${encodeURIComponent(actor)}/permission`);
-    const perm = res?.permission ?? 'none';
-    const role = res?.role_name ?? perm;
-    if (['admin', 'write', 'maintain'].includes(perm) || ['admin', 'maintain', 'write'].includes(role)) {
-      return { allowed: true, reason: `${actor} has ${role} access` };
+
+  const check = async (login, type) => {
+    const isBot = type === 'Bot' || /\[bot\]$/i.test(login);
+    if (isBot) {
+      const bare = login.replace(/\[bot\]$/i, '');
+      const ok = inputs.allowedBots.includes('*') || inputs.allowedBots.some((b) => b.replace(/\[bot\]$/i, '').toLowerCase() === bare.toLowerCase());
+      return ok ? { allowed: true, reason: `bot ${login} is allowed` } : { allowed: false, reason: `bot ${login} is not in allowed_bots` };
     }
-    return { allowed: false, reason: `${actor} has ${role} access; write access is required` };
-  } catch (err) {
-    if (err.status === 404) return { allowed: false, reason: `${actor} is not a collaborator` };
-    throw err;
+    if (inputs.allowedNonWriteUsers.includes('*') || inputs.allowedNonWriteUsers.some((u) => u.toLowerCase() === login.toLowerCase())) {
+      return { allowed: true, reason: `${login} is in allowed_non_write_users` };
+    }
+    try {
+      const res = await github.get(`/repos/${ctx.owner}/${ctx.repo}/collaborators/${encodeURIComponent(login)}/permission`);
+      const perm = res?.permission ?? 'none';
+      const role = res?.role_name ?? perm;
+      if (['admin', 'write', 'maintain'].includes(perm) || ['admin', 'maintain', 'write'].includes(role)) {
+        return { allowed: true, reason: `${login} has ${role} access` };
+      }
+      return { allowed: false, reason: `${login} has ${role} access; write access is required` };
+    } catch (err) {
+      if (err.status === 404) return { allowed: false, reason: `${login} is not a collaborator` };
+      throw err;
+    }
+  };
+
+  const actor = await check(ctx.actor, ctx.senderType);
+  if (!actor.allowed) return actor;
+  // An `edited` event is triggered by whoever edited, but the request is the text, and somebody
+  // else may have written it: a maintainer who fixes a typo in a stranger's issue must not run
+  // the stranger's request with the maintainer's rights.
+  if (author && author.login.toLowerCase() !== ctx.actor.toLowerCase()) {
+    const writer = await check(author.login, author.type);
+    if (!writer.allowed) return { allowed: false, reason: `the request was written by ${author.login}, not by ${ctx.actor} who edited it: ${writer.reason}` };
   }
+  return actor;
 }
 
 /** include / exclude comment authors (exclusion wins). */

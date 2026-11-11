@@ -7,14 +7,14 @@ import { execFileSync } from 'node:child_process';
 import { createGitHubMock } from '../mock-github/server.mjs';
 import { createClient } from '../../src/github/api.mjs';
 import { restoreSessionArtifact } from '../../src/github/session-store.mjs';
-import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
+import { resolveHarness, permissionProfile, getAdapter } from '../../src/harness/index.mjs';
 import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
-import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt } from '../../src/stages/run.mjs';
+import { feedbackPrompt, TURN_MARKER, runCheck, isSessionId, argvPrompt, spentLimit } from '../../src/stages/run.mjs';
 import { previousReply, conversationBranch, buildThread, ownComments, commentLister, prCheckout } from '../../src/stages/prepare.mjs';
 import { buildFollowupPrompt, buildPrompt } from '../../src/prompt.mjs';
-import { loopLine, finalBody, findingsTable } from '../../src/publish/render.mjs';
+import { loopLine, finalBody, findingsTable, summaryMarkdown } from '../../src/publish/render.mjs';
 import { stepIndex } from '../mock-llm/server.mjs';
 
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -63,6 +63,15 @@ test('loop settings', () => {
   assert.deepEqual(loopSettings(inputs({ max_iterations: '3' })), { maxIterations: 3, until: '' });
 });
 
+test('a loop does not start another turn once a limit is spent', () => {
+  const limits = { maxSteps: 200, timeoutMinutes: 30, budgetUsd: 1 };
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 40, cost: 0.2 }), null);
+  assert.equal(spentLimit(limits, { elapsedMin: 30.1, tools: 40, cost: 0.2 }).status, 'timeout');
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 200, cost: 0.2 }).status, 'max_steps');
+  assert.equal(spentLimit(limits, { elapsedMin: 12, tools: 40, cost: 1 }).status, 'budget');
+  assert.equal(spentLimit({ ...limits, budgetUsd: 0 }, { elapsedMin: 12, tools: 40, cost: 5 }), null); // no budget set
+});
+
 test('conversation key', () => {
   const issue = { number: 7, isPR: false };
   assert.equal(sessionThread(inputs(), issue, 'tag'), 'issue-7');
@@ -77,15 +86,19 @@ test('conversation key', () => {
 });
 
 test('feedback prompts', () => {
-  const check = feedbackPrompt({ check: { command: 'npm test', code: 1, output: 'FAIL x' }, iteration: 2, max: 5, resumable: true });
+  const check = feedbackPrompt({ check: { command: 'npm test', code: 1, output: 'FAIL x' }, iteration: 2, max: 5 });
   assert.ok(check.startsWith(TURN_MARKER));
   assert.match(check, /npm test.*exit code 1/);
   assert.match(check, /FAIL x/);
-  assert.doesNotMatch(check, /Previous attempt/);
-  const fresh = feedbackPrompt({ iteration: 2, max: 3, resumable: false, original: 'ORIGINAL TASK', previousText: 'did half' });
-  assert.match(fresh, /ORIGINAL TASK/);
-  assert.match(fresh, /did half/);
-  assert.match(fresh, /task_complete/);
+  assert.match(check, /\(iteration 2 of 5\)$/);
+  const undeclared = feedbackPrompt({ iteration: 2, max: 3 });
+  assert.match(undeclared, /task_complete/);
+  // every harness resumes its session: the loop relies on it
+  for (const id of ['opencode', 'codex', 'pi', 'openclaw']) {
+    const a = getAdapter(id);
+    assert.equal(typeof a.importSession, 'function', id);
+    assert.equal(typeof a.exportSession, 'function', id);
+  }
 });
 
 test('completion check runner', async () => {
@@ -125,6 +138,29 @@ test('earlier replies are part of the conversation, reduced to their text', () =
   // only the footer goes: a reply that uses <sub> itself keeps everything after it
   const own = previousReply('<!-- harness-action:tracking -->\nStep 1\n<sub>a note</sub>\n\nStep 2: the important part.\n\n<sub>**pi** · `m` · 3s</sub>');
   assert.match(own, /<sub>a note<\/sub>\n\nStep 2: the important part\.$/);
+});
+
+test('a reply too long for a comment is shortened without losing the frame around it', () => {
+  const long = `Intro\n\n\`\`\`js\n${'const x = 1;\n'.repeat(8000)}\`\`\`\n\nConclusion.`; // ~100,000 characters, cut inside the code block
+  const body = finalBody({ harness: 'pi', model: 'm', runUrl: 'u', run: { durationMs: 1000, tools: 3 }, status: 'success', finalText: long, findings: [{ file: 'a.js', line: 1, severity: 'error', message: 'boom' }], branch: { name: 'b', url: 'bu', created: true } });
+  assert.ok(body.length <= 64_000, String(body.length));
+  assert.match(body, /^<!-- harness-action:tracking -->/);
+  assert.match(body, /truncated \(\d+ more characters\): the full text is in the job summary/);
+  assert.match(body, /<sub>\*\*pi\*\* · `m` · 1s · 3 tool calls · \[job run\]\(u\)<\/sub>$/); // the footer is still the last line
+  assert.equal(body.match(/<details>/g).length, body.match(/<\/details>/g).length);
+  assert.equal(body.match(/^```/gm).length % 2, 0); // the code block the cut fell in is closed
+  assert.match(finalBody({ harness: 'pi', model: 'm', runUrl: 'u', status: 'success', finalText: 'short' }), /\nshort\n/);
+});
+
+test('the job summary stays under the size the runner accepts', () => {
+  const run = { durationMs: 1000, tools: 1, inputTokens: 1, outputTokens: 1, cost: 0, costKnown: false };
+  const transcript = 'é'.repeat(900_000); // 1.8 MB of UTF-8
+  const summary = summaryMarkdown({ harness: 'pi', version: '1', model: 'm', mode: 'automation', status: 'success', run, finalText: 'RESULT', findings: [], transcript });
+  assert.ok(Buffer.byteLength(summary) <= 1_000_000, String(Buffer.byteLength(summary)));
+  assert.match(summary, /### Result\n\nRESULT/);
+  assert.match(summary, /truncated: the full log is execution\.jsonl[\s\S]*<\/details>$/);
+  const huge = summaryMarkdown({ harness: 'pi', version: '1', model: 'm', mode: 'automation', status: 'success', run, finalText: 'x'.repeat(3_000_000), findings: [], transcript });
+  assert.ok(Buffer.byteLength(huge) <= 1_000_000);
 });
 
 test('a finding title cannot break the findings table', () => {

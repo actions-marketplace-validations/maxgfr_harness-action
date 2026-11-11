@@ -52,6 +52,8 @@ export function findingsTable(findings, { max = 30, blobUrl } = {}) {
   return `| Severity | Location | Finding |\n|---|---|---|\n${rows.join('\n')}${more}`;
 }
 
+const list = (paths) => paths.map((p) => `\`${p}\``).join(', ');
+
 export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, runUrl, run, status, finalText, progress, branch, findings = [], outsideDiff = [], blobUrl, errorText, review }) {
   const L = [marker];
   if (sticky) L.push(sticky);
@@ -64,21 +66,45 @@ export function finalBody({ marker = TRACKING_MARKER, sticky, harness, model, ru
     const pr = branch.pullUrl ? ` · [**Pull request #${branch.pullNumber} ➔**](${branch.pullUrl})` : branch.prUrl ? ` · [**Create PR ➔**](${branch.prUrl})` : '';
     L.push('', `🌿 ${branch.created ? 'New branch' : 'Pushed to'} [\`${branch.name}\`](${branch.url})${branch.commitUrl ? ` · [commit](${branch.commitUrl})` : ''}${pr}`);
     if (branch.skipped?.length) L.push('', `> ⚠️ Not committed — symbolic links and nested repositories cannot be committed through the API: ${branch.skipped.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact).`);
+    if (branch.lfs?.length) L.push('', `> ⚠️ Not committed — tracked by Git LFS, which the API cannot write to: ${list(branch.lfs)}. They are in \`changes.patch\` (report artifact).`);
+    if (branch.executable?.length) L.push('', `> ⚠️ Committed without the executable bit (the API creates new files as 100644): ${list(branch.executable)}. Restore it with \`git update-index --chmod=+x\`.`);
     if (branch.leftOut?.length) L.push('', `> ⚠️ Not committed — the job token cannot change workflow files: ${branch.leftOut.map((p) => `\`${p}\``).join(', ')}. They are in \`changes.patch\` (report artifact); a GitHub App token with the *workflows* permission as \`github_token\` can commit them.`);
   }
   if (review) L.push('', `💬 Posted a review with ${review} inline comment${review === 1 ? '' : 's'}.`);
   const loopText = loopLine(run);
   if (loopText) L.push('', loopText);
   L.push('', '---', '');
-  L.push(finalText?.trim() ? finalText.trim() : '_The agent did not produce a final message._');
-  if (findings.length) L.push('', `<details><summary>${findings.length} finding${findings.length === 1 ? '' : 's'}</summary>`, '', findingsTable(findings, { blobUrl }), '', '</details>');
+  const head2 = L.join('\n');
+  const T = [];
+  if (findings.length) T.push('', `<details><summary>${findings.length} finding${findings.length === 1 ? '' : 's'}</summary>`, '', findingsTable(findings, { blobUrl }), '', '</details>');
   if (outsideDiff.length) {
-    L.push('', '<details><summary>Review comments outside the diff</summary>', '');
-    for (const c of outsideDiff) L.push(`- \`${c.path}:${c.line}\` — ${c.body.replace(/\n/g, ' ')}`);
-    L.push('', '</details>');
+    T.push('', '<details><summary>Review comments outside the diff</summary>', '');
+    for (const c of outsideDiff) T.push(`- \`${c.path}:${c.line}\` — ${c.body.replace(/\n/g, ' ')}`);
+    T.push('', '</details>');
   }
-  L.push('', footer({ harness, model, run, runUrl }));
-  return truncate(L.join('\n'), 64000);
+  T.push('', footer({ harness, model, run, runUrl }));
+  const tail = T.join('\n');
+  // A comment holds 65,536 characters. When the reply is too long, it is the reply that is
+  // shortened: cutting the whole body would lose the footer and leave a <details> open.
+  const text = fitText(finalText?.trim() || '_The agent did not produce a final message._', COMMENT_LIMIT - head2.length - tail.length - 2, 'the full text is in the job summary');
+  return truncate(`${head2}\n${text}\n${tail}`, COMMENT_LIMIT);
+}
+
+const COMMENT_LIMIT = 64_000;
+
+/** `text` cut to `max` characters, with a note, and with a code block left open by the cut closed. */
+export function fitText(text, max, where) {
+  if (text.length <= max) return text;
+  const kept = text.slice(0, Math.max(0, max - 200));
+  const openFence = (kept.match(/^```/gm) ?? []).length % 2 === 1;
+  return `${kept}${openFence ? '\n```' : ''}\n\n_… truncated (${text.length - kept.length} more characters): ${where}._`;
+}
+
+/** `text` cut to `maxBytes` of UTF-8 (limits of the job summary are in bytes). */
+function fitBytes(text, maxBytes, where) {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const kept = Buffer.from(text).subarray(0, Math.max(0, maxBytes - 300)).toString('utf8').replace(/\uFFFD+$/, '');
+  return `${kept}\n\n…truncated: ${where}.`;
 }
 
 /** "🔁 3 iterations · `npm test` passed" / "↺ continued the conversation". */
@@ -115,12 +141,19 @@ export function summaryMarkdown({ harness, version, model, mode, status, run, fi
   else if (branch?.prUrl) L.push(`| Pull request | [Create PR ➔](${branch.prUrl}) |`);
   L.push('');
   if (errorText) L.push(`> [!WARNING]\n> ${truncate(errorText, 2000).replace(/\n/g, '\n> ')}`, '');
-  if (finalText) L.push('### Result', '', finalText.trim(), '');
+  // A step summary larger than 1 MiB is refused whole by the runner: every part has a share of
+  // SUMMARY_LIMIT, and the transcript, the one that grows without bound, takes what is left.
+  if (finalText) L.push('### Result', '', fitBytes(finalText.trim(), SUMMARY_LIMIT * 0.4, 'the full text is in final.md (report artifact)'), '');
   if (findings?.length) L.push(`### Findings (${findings.length})`, '', findingsTable(findings, { max: 200, blobUrl }), '');
-  if (structured) L.push('### Structured output', '', '```json', JSON.stringify(structured, null, 2), '```', '');
-  if (transcript) L.push('<details><summary>Transcript</summary>', '', transcript, '', '</details>');
-  return L.join('\n');
+  if (structured) L.push('### Structured output', '', '```json', fitBytes(JSON.stringify(structured, null, 2), SUMMARY_LIMIT * 0.2, 'the full value is in structured_output.json (report artifact)'), '```', '');
+  const body = L.join('\n');
+  if (!transcript) return fitBytes(body, SUMMARY_LIMIT, 'see the report artifact');
+  const room = SUMMARY_LIMIT - Buffer.byteLength(body) - 200;
+  if (room < 2000) return `${fitBytes(body, SUMMARY_LIMIT - 200, 'see the report artifact')}\n\n_Transcript left out (no room): see execution.jsonl in the report artifact._`;
+  return `${body}\n<details><summary>Transcript</summary>\n\n${fitBytes(transcript, room, 'the full log is execution.jsonl (report artifact)')}\n\n</details>`;
 }
+
+const SUMMARY_LIMIT = 1_000_000; // bytes; the runner's limit is 1 MiB per step
 
 export function transcriptMarkdown(events, { max = 400 } = {}) {
   const L = [];

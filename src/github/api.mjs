@@ -7,8 +7,10 @@ export class GitHubError extends Error {
   }
 }
 
-export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com', graphqlUrl = process.env.GITHUB_GRAPHQL_URL, retryDelayMs = 1000 } = {}) {
+export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com', graphqlUrl = process.env.GITHUB_GRAPHQL_URL, retryDelayMs = 1000, timeoutMs = 60_000 } = {}) {
   const backoff = (attempt) => new Promise((r) => setTimeout(r, retryDelayMs * 2 ** attempt));
+  // No request waits for ever: a connection that hangs would hold the step until the job timeout.
+  const deadline = (ms = timeoutMs) => AbortSignal.timeout(ms);
   const gql = graphqlUrl || `${apiUrl.replace(/\/$/, '')}/graphql`;
   const headers = (extra = {}) => ({
     accept: 'application/vnd.github+json',
@@ -27,9 +29,10 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
           method,
           headers: headers({ ...(accept ? { accept } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }),
           body: body ? JSON.stringify(body) : undefined,
+          signal: deadline(binary ? timeoutMs * 5 : timeoutMs), // (a download gets longer)
         });
       } catch (err) {
-        // A dropped connection. Only a read is retried: a write may have reached GitHub.
+        // A dropped or stalled connection. Only a read is retried: a write may have reached GitHub.
         if (method !== 'GET' || attempt >= retries) throw err;
         await backoff(attempt);
         continue;
@@ -52,16 +55,22 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
     }
   }
 
-  async function paginate(path, { max = 1000 } = {}) {
+  /**
+   * Every page of a list, up to `max` items. When the list is longer than `max` and `total` (its
+   * known length) is given, the NEWEST `max` items are returned instead of the oldest: the pages
+   * before them are not even requested.
+   */
+  async function paginate(path, { max = 1000, total = 0 } = {}) {
     const out = [];
     const sep = path.includes('?') ? '&' : '?';
-    for (let page = 1; out.length < max; page++) {
+    const fromEnd = total > max;
+    for (let page = fromEnd ? Math.floor((total - max) / 100) + 1 : 1; ; page++) {
       const batch = await request('GET', `${path}${sep}per_page=100&page=${page}`);
       const items = Array.isArray(batch) ? batch : batch?.items ?? batch?.check_runs ?? batch?.workflow_runs ?? [];
       out.push(...items);
-      if (items.length < 100) break;
+      if (items.length < 100 || (!fromEnd && out.length >= max)) break;
     }
-    return out.slice(0, max);
+    return fromEnd ? out.slice(-max) : out.slice(0, max);
   }
 
   async function graphql(query, variables = {}) {
@@ -69,6 +78,7 @@ export function createClient({ token, apiUrl = process.env.GITHUB_API_URL || 'ht
       method: 'POST',
       headers: headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ query, variables }),
+      signal: deadline(timeoutMs * 5), // (a commit carries every changed file)
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || json.errors?.length) {

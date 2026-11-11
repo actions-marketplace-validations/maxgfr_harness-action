@@ -3,36 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { readInputs } from '../../src/inputs.mjs';
 import { commitChanges } from '../../src/stages/publish.mjs';
+import crypto from 'node:crypto';
+import { commitViaApi, stripCredentials, restoreCredentials, privateGitDir, snapshotGit, restoreGit, treeChanges } from '../../src/git.mjs';
 import { finalBody } from '../../src/publish/render.mjs';
-
-const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
-
-const IDENTITY = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
-const g = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...IDENTITY } }).trim();
-
-/** Commits the whole working tree with plumbing only (no hook and no signing involved). */
-function commitAll(cwd, message) {
-  g(cwd, 'add', '-A');
-  let parent = '';
-  try { parent = g(cwd, 'rev-parse', '--verify', '-q', 'HEAD'); } catch {}
-  const sha = g(cwd, 'commit-tree', g(cwd, 'write-tree'), ...(parent ? ['-p', parent] : []), '-m', message);
-  g(cwd, 'update-ref', 'HEAD', sha);
-  return sha;
-}
-
-/** A repository with one commit: README.md and packages/app/a.txt. */
-function makeRepo() {
-  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-git-')));
-  const repo = path.join(tmp, 'repo');
-  fs.mkdirSync(path.join(repo, 'packages', 'app'), { recursive: true });
-  g(repo, 'init', '-q', '-b', 'main');
-  fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n');
-  fs.writeFileSync(path.join(repo, 'packages', 'app', 'a.txt'), 'a\n');
-  return { tmp, repo, base: commitAll(repo, 'init') };
-}
+import { inputs, g, commitAll, makeRepo, runPublish } from './helpers.mjs';
 
 /** The GitHub client `commitChanges` needs, recording what it is asked to do. */
 function fakeGitHub({ onRef = () => {} } = {}) {
@@ -158,6 +133,190 @@ test('a branch name that is already taken gets a suffix instead of losing the co
   // any other refusal is still an error
   const denied = fakeGitHub({ onRef: () => { throw Object.assign(new Error('403: Resource not accessible'), { status: 403 }); } });
   await assert.rejects(commit(repo, base, { github: denied }), /not accessible/);
+});
+
+test('the commit is retried when GitHub does not answer, without creating it twice', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'x.txt'), 'x\n');
+  const args = { owner: 'acme', repo: 'demo', branch: 'harness/x', expectedHeadOid: base, cwd: repo, changes: { additions: ['x.txt'], deletions: [] }, headline: 'pi: fix it', body: 'b', retryDelayMs: 1 };
+  const made = { createCommitOnBranch: { commit: { oid: 'new1', url: 'u' } } };
+  const client = ({ failures, head = base, headline = 'pi: fix it' }) => {
+    const calls = { graphql: 0, get: [] };
+    return {
+      calls,
+      graphql: async () => { if (calls.graphql++ < failures.length) throw failures[calls.graphql - 1]; return made; },
+      get: async (p) => { calls.get.push(p); return p.includes('/git/ref/') ? { object: { sha: head } } : { parents: [{ sha: base }], message: `${headline}\n\nbody`, html_url: 'https://example/landed' }; },
+    };
+  };
+  const badGateway = Object.assign(new Error('GraphQL: Bad Gateway'), { status: 502 });
+
+  // a 502, the branch has not moved: sent again
+  let github = client({ failures: [badGateway] });
+  assert.equal((await commitViaApi({ github, ...args })).oid, 'new1');
+  assert.equal(github.calls.graphql, 2);
+  // a dropped connection, but the commit was made: it is found on the branch, not sent again
+  github = client({ failures: [new TypeError('fetch failed')], head: 'landed1' });
+  assert.deepEqual(await commitViaApi({ github, ...args }), { oid: 'landed1', url: 'https://example/landed' });
+  assert.equal(github.calls.graphql, 1);
+  // the branch moved, but to somebody else's commit: not ours, so the retry goes out (and GitHub will refuse it)
+  github = client({ failures: [badGateway], head: 'other1', headline: 'unrelated push' });
+  await commitViaApi({ github, ...args });
+  assert.equal(github.calls.graphql, 2);
+  // a refusal is final
+  const refused = Object.assign(new Error('GraphQL: Resource not accessible by integration'), { status: 200 });
+  github = client({ failures: [refused] });
+  await assert.rejects(commitViaApi({ github, ...args }), /not accessible/);
+  assert.equal(github.calls.graphql, 1);
+  // GitHub stays down: the error comes out after the retries
+  github = client({ failures: [badGateway, badGateway, badGateway] });
+  await assert.rejects(commitViaApi({ github, ...args }), /Bad Gateway/);
+  assert.equal(github.calls.graphql, 3);
+});
+
+test('what the API cannot commit faithfully is left out or flagged: LFS files, the executable bit', async () => {
+  const { repo } = makeRepo();
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+  fs.writeFileSync(path.join(repo, 'old.sh'), '#!/bin/sh\n', { mode: 0o755 });
+  const base = commitAll(repo, 'lfs + a script');
+  fs.writeFileSync(path.join(repo, 'model.bin'), 'not a pointer, the content itself\n');
+  fs.writeFileSync(path.join(repo, 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(repo, 'old.sh'), '#!/bin/sh\necho changed\n'); // an existing file keeps its mode: nothing to flag
+  fs.writeFileSync(path.join(repo, 'notes.txt'), 'n\n');
+  const { branch, github, patch } = await commit(repo, base);
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path).sort(), ['notes.txt', 'old.sh', 'run.sh']);
+  assert.deepEqual(branch.lfs, ['model.bin']);
+  assert.deepEqual(branch.executable, ['run.sh']);
+  assert.match(patch, /model\.bin/); // not lost: it is in the patch
+  const reply = finalBody({ harness: 'pi', model: 'm', runUrl: 'u', status: 'success', finalText: 'ok', branch });
+  assert.match(reply, /Not committed — tracked by Git LFS[^\n]*`model\.bin`/);
+  assert.match(reply, /without the executable bit[^\n]*`run\.sh`/);
+});
+
+test('.openclaw/skills is part of the repository, the rest of .openclaw is harness state', async () => {
+  const { repo, base } = makeRepo();
+  fs.mkdirSync(path.join(repo, '.openclaw', 'skills', 'lint'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.openclaw', 'skills', 'lint', 'SKILL.md'), '---\nname: lint\n---\n');
+  fs.mkdirSync(path.join(repo, '.openclaw', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.openclaw', 'state', 'session.db'), 'state');
+  fs.writeFileSync(path.join(repo, '.openclaw', 'workspace.json'), '{}');
+  const { github, patch } = await commit(repo, base);
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path), ['.openclaw/skills/lint/SKILL.md']);
+  assert.doesNotMatch(patch, /session\.db|workspace\.json/);
+  // … and nothing at all when only the state changed
+  const second = makeRepo();
+  fs.mkdirSync(path.join(second.repo, '.openclaw'));
+  fs.writeFileSync(path.join(second.repo, '.openclaw', 'workspace.json'), '{}');
+  assert.equal((await commit(second.repo, second.base)).branch, null);
+});
+
+test('checkout credentials are removed from the repository and from every submodule, then put back', () => {
+  const { repo } = makeRepo();
+  const header = 'http.https://github.com/.extraheader';
+  const secret = 'AUTHORIZATION: basic c2VjcmV0';
+  // what `actions/checkout` (up to v5) with `submodules: recursive` leaves behind
+  const modules = ['libs/core', 'libs/core/modules/nested', 'docs'].map((name) => path.join(repo, '.git', 'modules', name));
+  for (const dir of modules) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'HEAD'), 'ref: refs/heads/main\n');
+    g(repo, 'config', '--file', path.join(dir, 'config'), header, secret);
+  }
+  g(repo, 'config', '--local', header, secret);
+  const configs = [path.join(repo, '.git', 'config'), ...modules.map((d) => path.join(d, 'config'))];
+  const leaked = () => configs.filter((f) => fs.readFileSync(f, 'utf8').includes('c2VjcmV0'));
+
+  const removed = stripCredentials(repo);
+  assert.deepEqual(leaked(), []);
+  assert.deepEqual(removed.headers.map((h) => h.file).sort(), [...configs].sort());
+
+  restoreCredentials(repo, removed, 'ghs_newtoken');
+  const expected = `AUTHORIZATION: basic ${Buffer.from('x-access-token:ghs_newtoken').toString('base64')}`;
+  for (const f of configs) assert.equal(g(repo, 'config', '--file', f, '--get', header), expected, f);
+
+  // a config the agent swapped for a link does not receive the token
+  const again = stripCredentials(repo);
+  const decoy = path.join(repo, 'decoy.txt');
+  fs.writeFileSync(decoy, '');
+  fs.rmSync(configs[1]);
+  fs.symlinkSync(decoy, configs[1]);
+  restoreCredentials(repo, again, 'ghs_newtoken');
+  assert.equal(fs.readFileSync(decoy, 'utf8'), '');
+});
+
+test("publish reads the checkout through its own git directory and the root prepare recorded", async () => {
+  const { tmp, repo, base } = makeRepo();
+  // what prepare records, before the agent runs
+  const gitDir = privateGitDir(repo, path.join(tmp, 'private-git'));
+  // the agent's `.git`: a partial-clone remote whose ssh command is a program of its own, and a
+  // worktree pointing at the whole filesystem
+  const sentinel = path.join(tmp, 'ran');
+  const ssh = path.join(tmp, 'ssh.sh');
+  fs.writeFileSync(ssh, `#!/bin/sh\ntouch ${sentinel}\n`, { mode: 0o755 });
+  g(repo, 'config', 'remote.evil.url', 'ssh://example.invalid/x');
+  g(repo, 'config', 'remote.evil.promisor', 'true');
+  g(repo, 'config', 'extensions.partialClone', 'evil');
+  g(repo, 'config', 'core.sshCommand', ssh);
+  g(repo, 'config', 'core.fsmonitor', ssh);
+  g(repo, 'config', 'core.worktree', '/');
+  fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nchanged\n');
+  const { github } = await commit(repo, base, { context: { repoRoot: repo, gitDir } });
+  assert.ok(!fs.existsSync(sentinel), 'a program from the checkout configuration ran');
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path), ['README.md']);
+});
+
+test("the checkout's git configuration and hooks are put back as they were before the run", () => {
+  const { tmp, repo } = makeRepo();
+  g(repo, 'config', 'user.name', 'kept');
+  const manifest = snapshotGit(repo, path.join(tmp, 'snapshot'));
+  const configBefore = fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8');
+  // the agent's changes
+  g(repo, 'config', 'core.sshCommand', '/tmp/evil');
+  fs.writeFileSync(path.join(repo, '.git', 'hooks', 'post-checkout'), '#!/bin/sh\necho evil\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(repo, '.git', 'commondir'), '/tmp/elsewhere\n');
+  fs.chmodSync(path.join(repo, '.git', 'config'), 0o666);
+  const undone = restoreGit(manifest);
+  assert.equal(fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8'), configBefore);
+  assert.equal(fs.statSync(path.join(repo, '.git', 'config')).mode & 0o777, 0o644);
+  assert.ok(!fs.existsSync(path.join(repo, '.git', 'hooks', 'post-checkout')));
+  assert.ok(!fs.existsSync(path.join(repo, '.git', 'commondir')));
+  assert.deepEqual(undone.sort(), ['.git/commondir', '.git/config']);
+  // a `.git` replaced by the agent's own is removed, never read
+  fs.renameSync(path.join(repo, '.git'), path.join(tmp, 'moved'));
+  fs.mkdirSync(path.join(repo, '.git'));
+  fs.writeFileSync(path.join(repo, '.git', 'config'), '[core]\n\tfsmonitor = /tmp/evil\n');
+  assert.match(restoreGit(manifest).join(), /\.git was replaced/);
+  assert.ok(!fs.existsSync(path.join(repo, '.git')));
+});
+
+test('a file Git LFS checked out is unchanged when its content is the object its pointer names', async () => {
+  const { repo } = makeRepo();
+  const content = 'the real binary content\n';
+  const oid = crypto.createHash('sha256').update(content).digest('hex');
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+  // committed as pointers (no filter configured here: git stores the text as it is)
+  fs.writeFileSync(path.join(repo, 'same.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${content.length}\n`);
+  fs.writeFileSync(path.join(repo, 'edited.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${content.length}\n`);
+  const base = commitAll(repo, 'lfs pointers');
+  // what `git lfs` leaves in the working tree: the content
+  fs.writeFileSync(path.join(repo, 'same.bin'), content);
+  fs.writeFileSync(path.join(repo, 'edited.bin'), 'changed by the agent\n');
+  const changes = treeChanges(repo, base);
+  assert.deepEqual(changes.lfs, ['edited.bin']);
+  assert.deepEqual(changes.additions, []);
+  assert.doesNotMatch(changes.patch, /same\.bin/);
+  // nothing but checked-out LFS files: nothing changed at all
+  fs.writeFileSync(path.join(repo, 'edited.bin'), content);
+  assert.equal(treeChanges(repo, base).any, false);
+});
+
+test('credentials are stripped in a linked worktree too (they live in the common git directory)', () => {
+  const { tmp, repo } = makeRepo();
+  const header = 'http.https://github.com/.extraheader';
+  g(repo, 'config', '--local', header, 'AUTHORIZATION: basic c2VjcmV0');
+  const linked = path.join(tmp, 'linked');
+  g(repo, 'worktree', 'add', '-q', '--detach', linked);
+  const removed = stripCredentials(linked);
+  assert.equal(removed.headers.length, 1);
+  assert.doesNotMatch(fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8'), /c2VjcmV0/);
 });
 
 test('an unchanged tree commits nothing', async () => {

@@ -28,6 +28,17 @@ export function argvPrompt(file) {
 }
 export const TURN_MARKER = '<!-- harness-turn -->';
 
+/**
+ * `max_steps`, `timeout_minutes` and `budget_usd` cover the whole loop. Which one is used up, as
+ * { status, reason }, or null when another turn may start.
+ */
+export function spentLimit(limits, { elapsedMin, tools, cost }) {
+  if (elapsedMin >= limits.timeoutMinutes) return { status: 'timeout', reason: `timeout after ${limits.timeoutMinutes} min (timeout_minutes)` };
+  if (tools >= limits.maxSteps) return { status: 'max_steps', reason: `${tools} tool calls used (max_steps ${limits.maxSteps})` };
+  if (limits.budgetUsd && cost >= limits.budgetUsd) return { status: 'budget', reason: `cost $${cost.toFixed(4)} reached budget_usd $${limits.budgetUsd}` };
+  return null;
+}
+
 /** A harness session / thread id as the four harnesses write them (`ses_…`, a UUID). */
 export const isSessionId = (id) => typeof id === 'string' && /^[A-Za-z0-9][\w.-]{0,127}$/.test(id);
 
@@ -50,12 +61,9 @@ export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
   });
 }
 
-export function feedbackPrompt({ check, iteration, max, resumable, original, previousText }) {
+/** The message of the next loop turn. The session is resumed, so it only says what is missing. */
+export function feedbackPrompt({ check, iteration, max }) {
   const L = [TURN_MARKER];
-  if (!resumable) {
-    // a harness that cannot resume a session: restate the task and what happened.
-    L.push(original, '', '## Previous attempt', '', previousText?.trim() || '_(no final message)_', '');
-  }
   if (check) {
     L.push(`The completion check \`${check.command}\` failed (exit code ${check.code}) after your last turn. Its output (last 8000 characters):`, '', '```', truncate(check.output.slice(-8000), 8000), '```', '', 'Find the cause, fix it, and verify before you finish.');
   } else {
@@ -75,7 +83,14 @@ export async function run({ stateDir, env = process.env }) {
 
   // `$env:NAME` values are references to the job environment, resolved only now.
   const planEnv = Object.fromEntries(Object.entries(plan.env ?? {}).map(([k, v]) => [k, typeof v === 'string' && v.startsWith('$env:') ? env[v.slice(5)] ?? '' : v]));
+  // A temp directory the agent's user can write to: $RUNNER_TEMP and the runner's $TMPDIR belong
+  // to the job's user, so without this every tool of the agent (and `loop_until`) that writes a
+  // temporary file fails. (Before `planEnv`: a harness that sets its own TMPDIR keeps it.)
+  const agentTmp = path.join(plan.home, 'tmp');
+  fs.mkdirSync(agentTmp, { recursive: true });
+  const tmpEnv = { TMPDIR: agentTmp, TEMP: agentTmp, TMP: agentTmp };
   const childEnv = sanitizedEnv(env, {
+    ...tmpEnv,
     ...planEnv,
     HOME: plan.home,
     PWD: plan.workDir, // opencode resolves its project from $PWD, not from the process cwd
@@ -90,13 +105,12 @@ export async function run({ stateDir, env = process.env }) {
 
   const loop = plan.loop ?? { maxIterations: 1 };
   const session = plan.session ?? { enabled: false };
-  const resumable = Boolean(adapter.resumable);
   let sessionId = null;
   let resumed = false;
 
   if (adapter.beforeRun) await adapter.beforeRun({ ...helper, log: core.info }).catch((err) => core.info(`beforeRun: ${err.message}`));
 
-  if (session.enabled && resumable && session.dir) {
+  if (session.enabled && session.dir) {
     const meta = path.join(session.dir, 'meta.json');
     let saved = null;
     try { saved = JSON.parse(fs.readFileSync(meta, 'utf8')); } catch {}
@@ -124,13 +138,21 @@ export async function run({ stateDir, env = process.env }) {
   try {
     for (let i = 1; i <= loop.maxIterations; i++) {
       const elapsedMin = (Date.now() - started) / 60_000;
+      // The limits cover the whole loop: once one is spent, another turn is not started.
+      const spent = i > 1 ? spentLimit(plan.limits, { elapsedMin, tools: total.tools, cost: total.cost }) : null;
+      if (spent) {
+        core.info(`⛔ not starting iteration ${i}: ${spent.reason}`);
+        last = { ...last, status: spent.status, killedReason: spent.reason };
+        loopResult = 'stopped';
+        break;
+      }
       const limits = {
         maxSteps: Math.max(1, plan.limits.maxSteps - total.tools),
         timeoutMinutes: Math.max(0.5, plan.limits.timeoutMinutes - elapsedMin),
         budgetUsd: plan.limits.budgetUsd ? Math.max(0.000001, plan.limits.budgetUsd - total.cost) : 0,
       };
       const completesBefore = readOutbox(stateDir).filter((e) => e.kind === 'complete').length;
-      const { args, stdin, sessionId: chosen } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId: resumable ? sessionId : null, timeoutMinutes: limits.timeoutMinutes });
+      const { args, stdin, sessionId: chosen } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId, timeoutMinutes: limits.timeoutMinutes });
       if (chosen) sessionId = chosen; // harnesses where the action picks the session id (OpenClaw)
       if (loop.maxIterations > 1) core.info(`\n━━ iteration ${i}/${loop.maxIterations} ━━`);
       core.info(`▶ ${plan.harness} ${args.filter((a) => a !== prompt && a !== '-').join(' ').slice(0, 300)} …`);
@@ -164,7 +186,7 @@ export async function run({ stateDir, env = process.env }) {
       let check = null;
       if (loop.until) {
         core.info(`✓? completion check: ${loop.until}`);
-        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env) });
+        const r = await runCheck(loop.until, { cwd: plan.workDir, env: sanitizedEnv(env, tmpEnv) });
         it.check = { code: r.code };
         core.info(r.code === 0 ? '   passed' : `   failed (exit ${r.code})`);
         if (r.code === 0) { loopResult = 'passed'; break; }
@@ -174,10 +196,10 @@ export async function run({ stateDir, env = process.env }) {
         if (done) { loopResult = 'complete'; break; }
       }
       if (i === loop.maxIterations) break;
-      prompt = feedbackPrompt({ check, iteration: i + 1, max: loop.maxIterations, resumable, original: firstPrompt, previousText: acc.finalText });
+      prompt = feedbackPrompt({ check, iteration: i + 1, max: loop.maxIterations });
     }
   } finally {
-    if (session.enabled && resumable && sessionId && session.dir && last?.status !== undefined) {
+    if (session.enabled && sessionId && session.dir && last?.status !== undefined) {
       fs.mkdirSync(session.dir, { recursive: true });
       const ok = await adapter.exportSession({ ...helper, dir: session.dir, sessionId }).catch(() => false);
       if (ok) {

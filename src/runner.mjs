@@ -1,5 +1,6 @@
 // Spawns the harness, normalises its output, enforces the limits of an unattended run.
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createAccumulator } from './harness/index.mjs';
 import { truncate, sanitizedEnv } from './util.mjs';
@@ -22,13 +23,17 @@ function lineSplitter(onLine) {
   };
 }
 
-function describe(ev) {
+const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+export function describe(ev) {
   switch (ev.t) {
     case 'text': return `💬 ${truncate(ev.text.replace(/\s+/g, ' '), 300)}`;
-    case 'tool': return `🔧 ${ev.name} ${truncate(JSON.stringify(ev.input ?? {}), 200)}`;
-    case 'tool_result': return ev.error ? `   ✗ ${ev.name}: ${truncate(ev.error, 200)}` : null;
-    case 'error': return `❌ ${ev.message}`;
-    case 'warning': return `⚠️  ${ev.message}`;
+    case 'tool': return `🔧 ${oneLine(ev.name)} ${truncate(JSON.stringify(ev.input ?? {}), 200)}`;
+    // (one line each: a newline in text the agent or a tool chose could start a line `::…`,
+    // which the runner would read as a workflow command)
+    case 'tool_result': return ev.error ? `   ✗ ${ev.name}: ${truncate(oneLine(ev.error), 200)}` : null;
+    case 'error': return `❌ ${oneLine(ev.message)}`;
+    case 'warning': return `⚠️  ${oneLine(ev.message)}`;
     default: return null;
   }
 }
@@ -48,6 +53,12 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
     let eventIndex = 0;
     let lastTextIndex = -1;
     let lastToolIndex = -1;
+
+    // show_full_output prints what the harness prints, and the agent decides part of that. A
+    // line starting with `::` would be read by the runner as a workflow command: command
+    // processing is suspended for as long as raw output is on, with a token the agent cannot know.
+    const rawGuard = showFullOutput ? crypto.randomBytes(16).toString('hex') : null;
+    if (rawGuard) log(`::stop-commands::${rawGuard}`);
 
     const child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 
@@ -134,6 +145,7 @@ export function runHarness({ adapter, bin, args, stdin, cwd, env, executionFile,
       else if ((exitCode !== 0 && !benignExit) || fatalError || (!acc.finalText && acc.errors.length)) status = 'error';
       fs.closeSync(exec);
       if (raw) fs.closeSync(raw);
+      if (rawGuard) log(`::${rawGuard}::`);
       resolve({ status, exitCode, durationMs: Date.now() - started, acc, killedReason });
     });
   });

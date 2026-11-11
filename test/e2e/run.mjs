@@ -2,11 +2,11 @@
 // Keyless end-to-end test: the real harness binaries, a scripted mock LLM and a mock GitHub API,
 // driven through the exact steps of action.yml (resolve → prepare → run → publish).
 //
-//   node test/e2e/run.mjs [--harness opencode,codex,pi,openclaw] [--scenario issue-tag,pr-automation,conversation-loop]
+//   node test/e2e/run.mjs [--harness opencode,codex,pi,openclaw] [--scenario issue-tag,pr-automation,conversation-loop,sandbox]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createMockServer } from '../mock-llm/server.mjs';
 import { createGitHubMock } from '../mock-github/server.mjs';
@@ -15,7 +15,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const CLI = path.join(ROOT, 'src', 'cli.mjs');
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : d; };
 const HARNESSES = arg('harness', 'opencode,codex,pi,openclaw').split(',');
-const SCENARIOS = arg('scenario', 'issue-tag,pr-automation,conversation-loop').split(',');
+const SCENARIOS = arg('scenario', 'issue-tag,pr-automation,conversation-loop,sandbox').split(',');
 const TOOLS_DIR = process.env.HARNESS_TOOLS_DIR || path.join(ROOT, '.harness', 'tools');
 
 function harnessInputs(h) {
@@ -307,7 +307,7 @@ async function conversationLoop(harness) {
     ['run 1: publish green', first.pub.code === 0],
   ];
   let second = null;
-  if (getAdapterResumable(harness)) {
+  {
     // What action.yml's upload-artifact step does: zip the session dir under the given name. Then
     // the dir is wiped, so run 2 can only resume through the artifact API.
     const artifactName = first.pub.outputs.session_artifact ?? '';
@@ -341,10 +341,102 @@ async function conversationLoop(harness) {
   return failed.length === 0;
 }
 
-const getAdapterResumable = () => true; // every supported harness resumes its sessions
+// ---------------------------------------------------------------------------------------------
+// sandbox: the agent (tools: full) tries to reach the steps that hold the token. Where the
+// runner can give it its own user (Linux, passwordless sudo) every attempt must fail; elsewhere
+// the scenario is skipped.
+// ---------------------------------------------------------------------------------------------
+async function sandboxScenario(harness) {
+  const { sandboxSupport } = await import(path.join(ROOT, 'src', 'sandbox.mjs'));
+  const support = sandboxSupport();
+  if (!support.ok) { console.log(`\n- ${harness} / sandbox: skipped (${support.reason})`); return true; }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `ha-e2e-sandbox-${harness}-`));
+  const workspace = path.join(tmp, 'workspace');
+  const { sha, cred } = makeRepo(workspace);
+  const probe = path.join(ROOT, 'src', '.sandbox-probe'); // the action's own sources
+  const stolen = path.join(tmp, 'stolen.txt');
+  // The attack is the completion check: code the agent influences, run after its turn. (Codex
+  // would refuse to run it from its own shell tool.)
+  const attackFile = path.join(tmp, 'attack.sh');
+  const llm = createMockServer({ steps: [{ shell: "printf 'sandboxed\\n' > ECHO.md" }, { text: 'ECHO_DONE — done.' }], log: path.join(tmp, 'llm.jsonl') });
+  const llmPort = await listen(llm);
+  const issue = { number: 7, title: 'Sandbox', body: 'b', html_url: 'https://github.com/acme/demo/issues/7', user: { login: 'alice' }, state: 'open' };
+  const gh = createGitHubMock({ issue });
+  const ghPort = await listen(gh.server);
+  fs.writeFileSync(path.join(tmp, 'event.json'), JSON.stringify({ action: 'created', issue, comment: { id: 555, body: '@harness do: create ECHO.md', user: { login: 'alice' } }, sender: { login: 'alice', id: 1, type: 'User' }, repository: { default_branch: 'main' } }));
+  const inputs = { harness, model: 'mock/mock-model', base_url: `http://127.0.0.1:${llmPort}/v1`, api_key_env: 'MOCK_API_KEY', github_token: 'ghs_mocktoken', tools: 'full', timeout_minutes: '5', loop_until: `bash ${attackFile}`, max_iterations: '2' };
+  const outputFile = path.join(tmp, 'output.txt');
+  const baseEnv = { ...process.env, GITHUB_EVENT_NAME: 'issue_comment', GITHUB_EVENT_PATH: path.join(tmp, 'event.json'), GITHUB_REPOSITORY: 'acme/demo', GITHUB_API_URL: `http://127.0.0.1:${ghPort}`, GITHUB_GRAPHQL_URL: `http://127.0.0.1:${ghPort}/graphql`, GITHUB_SERVER_URL: 'https://github.com', GITHUB_WORKSPACE: workspace, GITHUB_RUN_ID: '42', GITHUB_ACTOR: 'alice', GITHUB_SHA: sha, GITHUB_JOB: 'e2e', RUNNER_TEMP: tmp, GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: path.join(tmp, 'summary.md'), HARNESS_TOOLS_DIR: TOOLS_DIR, MOCK_API_KEY: 'mock-key' };
+  const step = (cmd, env) => new Promise((resolve) => {
+    fs.writeFileSync(outputFile, '');
+    const child = spawn(process.execPath, [CLI, cmd], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (out += c));
+    child.on('close', (code) => resolve({ code, out, outputs: readOutputs(outputFile) }));
+  });
+  const withInputs = { ...baseEnv, HARNESS_INPUTS: JSON.stringify(inputs) };
+  const resolveRes = await step('resolve', withInputs);
+  const stateDir = resolveRes.outputs.state_dir;
+  const tmpProbe = path.join(stateDir, 'tmp-probe.txt'); // (the state directory: the agent may add files there)
+  fs.writeFileSync(attackFile, [
+    // what any `loop_until` needs: a temp directory it can write to
+    `printf "$TMPDIR" > ${tmpProbe} && printf x > "$TMPDIR/probe" && printf ok >> ${tmpProbe}`,
+    `touch ${probe}`,
+    `printf tampered > ${path.join(stateDir, 'context.json')}`,
+    `rm -f ${path.join(stateDir, 'plan.json')}`,
+    `cat ${cred} > ${stolen}`, // (refused: the credentials are gone for the run, and this path is the runner's)
+    // left behind, to read the credentials once Publish has put them back
+    `(setsid sh -c 'sleep 20; cat ${cred} > ${stolen}' > /dev/null 2>&1 &)`,
+  ].map((c) => `${c} 2>/dev/null`).join('\n') + '\nexit 0\n');
+  const prep = await step('prepare', { ...withInputs, HARNESS_STATE_DIR: stateDir });
+  const before = fs.readFileSync(path.join(stateDir, 'context.json'), 'utf8');
+  const agentUser = JSON.parse(fs.readFileSync(path.join(stateDir, 'plan.json'), 'utf8')).sandbox?.user ?? '';
+  const configBefore = fs.readFileSync(path.join(workspace, '.git', 'config'), 'utf8');
+  const runRes = await step('run', { ...baseEnv, HARNESS_STATE_DIR: stateDir });
+  const agentAlive = Boolean(agentUser) && spawnSync('pgrep', ['-u', agentUser]).status === 0;
+  const contextKept = fs.readFileSync(path.join(stateDir, 'context.json'), 'utf8') === before && fs.existsSync(path.join(stateDir, 'plan.json'));
+  const pub = await step('publish', { ...withInputs, HARNESS_STATE_DIR: stateDir });
+  llm.close();
+  gh.server.close();
+  let runJson = {};
+  try { runJson = JSON.parse(fs.readFileSync(path.join(stateDir, 'run.json'), 'utf8')); } catch {}
+  const commits = gh.calls.filter((c) => c.path === '/graphql').map((c) => c.body?.variables?.input?.fileChanges?.additions?.map((a) => a.path) ?? []);
+  const ownedByRunner = (f) => fs.statSync(f).uid === process.getuid();
+  const checks = [
+    ['the agent ran as its own user', /The agent runs as ha-agent-[0-9a-f]+/.test(prep.out)],
+    ['run succeeded', runJson.status === 'success'],
+    ["the action's sources could not be written", !fs.existsSync(probe)],
+    ['context.json and plan.json could not be replaced', contextKept],
+    ['no agent process outlived the run step', !agentAlive],
+    ['the agent still did its work', commits.at(-1)?.includes('ECHO.md')],
+    ['the completion check has a temp directory it can write', (() => {
+      const seen = fs.existsSync(tmpProbe) ? fs.readFileSync(tmpProbe, 'utf8') : '';
+      if (!seen.endsWith('ok')) console.log(`   (TMPDIR for the check: ${seen || '(nothing)'})`);
+      return seen.endsWith('ok');
+    })()],
+    ['its files are the runner\'s again', fs.existsSync(path.join(workspace, 'ECHO.md')) && ownedByRunner(path.join(workspace, 'ECHO.md')) && ownedByRunner(stateDir)],
+    ['its user is gone after publish', Boolean(agentUser) && spawnSync('id', ['-u', agentUser]).status !== 0],
+    ['the working tree has its modes back', (fs.statSync(path.join(workspace, 'README.md')).mode & 0o777) === 0o644],
+    ["the checkout's git configuration is the one it had", fs.readFileSync(path.join(workspace, '.git', 'config'), 'utf8').replace(/\n\[includeIf[^\n]*\n[^\n]*\n?/, '\n') === configBefore.replace(/\n\[includeIf[^\n]*\n[^\n]*\n?/, '\n')],
+    ['publish green', pub.code === 0],
+  ];
+  fs.rmSync(probe, { force: true });
+  const failed = checks.filter(([, okc]) => !okc);
+  console.log(`\n${failed.length ? '✗' : '✓'} ${harness} / sandbox`);
+  for (const [label, okc] of checks) console.log(`   ${okc ? '✓' : '✗'} ${label}`);
+  if (failed.length) {
+    console.log('----- logs -----');
+    console.log([prep.out, runRes.out, pub.out].join('\n').split('\n').slice(-80).join('\n'));
+    console.log(`(tmp: ${tmp})`);
+  } else {
+    spawnSync('sudo', ['-n', 'rm', '-rf', tmp]);
+  }
+  return failed.length === 0;
+}
 
 let ok = true;
 for (const h of HARNESSES) {
-  for (const s of SCENARIOS) ok = (s === 'conversation-loop' ? await conversationLoop(h) : await scenario(h, s)) && ok;
+  for (const s of SCENARIOS) ok = (s === 'conversation-loop' ? await conversationLoop(h) : s === 'sandbox' ? await sandboxScenario(h) : await scenario(h, s)) && ok;
 }
 process.exit(ok ? 0 : 1);

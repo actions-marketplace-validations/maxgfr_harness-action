@@ -3,43 +3,38 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { publish } from '../../src/stages/publish.mjs';
 import { readInputs } from '../../src/inputs.mjs';
+import { tmpDir, runPublish, makeRepo } from './helpers.mjs';
 
-const tmpDir = (name) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ha-${name}-`)));
+test('a loop that ran out of turns without being declared done is a failed run', async () => {
+  const loop = (loopResult, loopUntil = '') => runPublish({ run: { iterations: [{ n: 1 }, { n: 2 }, { n: 3 }], loopResult, loopUntil } });
+  const undeclared = await loop('exhausted');
+  assert.equal(undeclared.outputs.conclusion, 'failure');
+  assert.match(undeclared.summary, /did not call task_complete within 3 iteration/);
+  assert.equal((await loop('complete')).outputs.conclusion, 'success');
+  assert.equal((await loop('exhausted', 'npm test')).outputs.conclusion, 'failure');
+  assert.equal((await loop('passed', 'npm test')).outputs.conclusion, 'success');
+  assert.equal((await runPublish()).outputs.conclusion, 'success'); // no loop
+});
 
-/**
- * Runs the publish stage offline: the working directory is not a git checkout and there is no
- * tracking comment or pull request, so it never calls the GitHub API.
- * @returns {{ exitCode: number, outputs: Record<string, string>, summary: string, stateDir: string }}
- */
-async function runPublish({ context = {}, run = {}, inputs = {}, files = {} } = {}) {
-  const stateDir = tmpDir('publish');
-  const write = (name, data) => {
-    fs.mkdirSync(path.dirname(path.join(stateDir, name)), { recursive: true });
-    fs.writeFileSync(path.join(stateDir, name), typeof data === 'string' ? data : JSON.stringify(data));
-  };
-  write('context.json', {
-    run: true, mode: 'automation', harness: 'pi', model: 'a/b', workDir: tmpDir('work'), version: '1', commitMode: 'none',
-    ctx: { owner: 'acme', repo: 'demo', number: null, isPR: false, actor: 'alice', runUrl: 'https://example/run', serverUrl: 'https://github.com', sha: 'abc' },
-    ...context,
-  });
-  write('run.json', { status: 'success', exitCode: 0, durationMs: 1000, finalText: 'done', tools: 1, inputTokens: 1, outputTokens: 1, cost: 0, costKnown: false, errors: [], iterations: [{ n: 1 }], loopResult: 'single', loopUntil: '', ...run });
-  for (const [name, data] of Object.entries(files)) write(name, data);
-  const env = Object.fromEntries(Object.entries({ model: 'a/b', harness: 'pi', ...inputs }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v]));
-  const outputFile = path.join(stateDir, 'outputs.txt');
-  const summaryFile = path.join(stateDir, 'summary.md');
-  const saved = { GITHUB_OUTPUT: process.env.GITHUB_OUTPUT, GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY };
-  Object.assign(process.env, { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: summaryFile });
+test('changes that could not be committed make the run a failure', async () => {
+  const { repo, base } = makeRepo();
+  fs.writeFileSync(path.join(repo, 'x.txt'), 'x\n');
+  const context = { workDir: repo, commitMode: 'new-branch', baseHead: base, branchName: 'main', request: 'fix it', ctx: { owner: 'acme', repo: 'demo', number: 7, isPR: false, actor: 'alice', actorId: 1, runUrl: 'https://example/run', serverUrl: 'https://github.com', defaultBranch: 'main', sha: base } };
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = 'http://127.0.0.1:9'; // nothing listens there: the branch cannot be created
   try {
-    const { exitCode } = await publish({ env, stateDir });
-    const outputs = {};
-    for (const m of fs.readFileSync(outputFile, 'utf8').matchAll(/^([\w-]+)<<(ghadelim_[\w-]+)\n([\s\S]*?)\n\2$/gm)) outputs[m[1]] = m[3];
-    return { exitCode, outputs, summary: fs.existsSync(summaryFile) ? fs.readFileSync(summaryFile, 'utf8') : '', stateDir };
+    const warn = await runPublish({ context });
+    assert.equal(warn.outputs.conclusion, 'failure');
+    assert.equal(warn.outputs.branch_name, '');
+    assert.equal(warn.exitCode, 0); // on_agent_error: warn
+    assert.match(warn.summary, /Could not commit the changes/);
+    assert.ok(fs.existsSync(path.join(warn.stateDir, 'report', 'changes.patch'))); // the work is not lost
+    assert.equal((await runPublish({ context, inputs: { on_agent_error: 'fail' } })).exitCode, 1);
   } finally {
-    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    if (saved === undefined) delete process.env.GITHUB_API_URL; else process.env.GITHUB_API_URL = saved;
   }
-}
+});
 
 test('a truncated execution log does not stop the publish step', async () => {
   const log = `${JSON.stringify({ t: 'text', text: 'TRANSCRIPT_LINE' })}\n${JSON.stringify({ t: 'tool', name: 'read', input: {} })}\n{"t":"text","text":"cut sho`;

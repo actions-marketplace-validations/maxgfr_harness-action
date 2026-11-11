@@ -5,8 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { createClient } from '../../src/github/api.mjs';
-import { runHarness } from '../../src/runner.mjs';
+import { runHarness, describe } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
+import { lockFile, manifestOf } from '../../src/harness/install.mjs';
+import { sandboxDecision, dropLinks, takeEnv, safePath, modesToRestore } from '../../src/sandbox.mjs';
+import { readRegular } from '../../src/util.mjs';
+import { collect } from '../../src/contract.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -15,7 +19,7 @@ import { readInputs } from '../../src/inputs.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
-import { redactMcpSecrets } from '../../src/stages/prepare.mjs';
+import { redactMcpSecrets, validateRun, checkSkillAvailable } from '../../src/stages/prepare.mjs';
 import { toToml } from '../../src/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
@@ -119,6 +123,104 @@ test('codex: TOML harness_config keeps its top-level keys at the top level', () 
   assert.equal(read('a = "b.toml"'), 'a = "b.toml"'); // inline TOML is kept as it is
 });
 
+test('mistakes the inputs alone show are reported before anything is posted or installed', () => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-validate-'));
+  const v = (harness, over = {}) => {
+    const i = readInputs(Object.fromEntries(Object.entries({ model: 'anthropic/m', harness, ...over }).map(([k, x]) => [`INPUT_${k.toUpperCase()}`, x])));
+    const model = { provider: i.model.split('/')[0], id: i.model.split('/').slice(1).join('/') };
+    if (!i.model.includes('/')) Object.assign(model, { provider: '', id: i.model });
+    return () => { validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }) }); checkSkillAvailable({ inputs: i, workDir: work }); };
+  };
+  assert.throws(v('codex'), /only speaks OpenAI-compatible/);
+  assert.throws(v('codex', { model: 'acme/m' }), /does not know provider "acme"/);
+  v('codex', { model: 'openrouter/anthropic/m' })();
+  assert.throws(v('opencode', { model: 'bare-model' }), /needs `model` as provider\/model/);
+  assert.throws(v('openclaw', { model: 'bare-model' }), /needs `model` as provider\/model/);
+  v('pi', { model: 'bare-model' })(); // pi has a default provider
+  // a skill to use that nothing provides
+  assert.throws(v('pi', { skill: 'lint' }), /skill "lint" is not installed/);
+  fs.mkdirSync(path.join(work, '.claude', 'skills', 'lint'), { recursive: true });
+  fs.writeFileSync(path.join(work, '.claude', 'skills', 'lint', 'SKILL.md'), '---\nname: lint\n---\n');
+  v('pi', { skill: 'lint' })();
+  v('pi', { skill: 'remote-one', skills: 'acme/skills' })(); // known only after the clone
+});
+
+test('every pinned harness version has a lockfile of its whole dependency tree', () => {
+  const versions = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'harness', 'versions.json'), 'utf8'));
+  for (const [id, meta] of Object.entries(versions)) {
+    const file = lockFile(id, meta.version);
+    assert.ok(fs.existsSync(file), `${file} is missing: run node scripts/bump-harnesses.mjs --lock`);
+    const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(manifestOf(lock).dependencies, { [meta.package]: meta.version }, id); // exact, the pinned one
+    const top = lock.packages[`node_modules/${meta.package}`];
+    assert.equal(top.version, meta.version, id);
+    // (a bundled package ships inside its parent's tarball, which has the hash)
+    for (const [where, p] of Object.entries(lock.packages)) if (where && !p.link && !p.inBundle) assert.ok(p.integrity, `${id}: ${where} has no integrity hash`);
+  }
+});
+
+test('the agent gets its own user whenever it can run code, if the runner allows it', () => {
+  const yes = () => ({ ok: true, reason: '' });
+  const no = () => ({ ok: false, reason: 'darwin runner' });
+  const shell = permissionProfile('full');
+  const noShell = permissionProfile('edit');
+  assert.equal(sandboxDecision({ mode: 'auto', perms: shell, support: yes }).enabled, true);
+  assert.equal(sandboxDecision({ mode: 'auto', perms: noShell, loopUntil: 'npm test', support: yes }).enabled, true); // the check runs code the agent wrote
+  assert.equal(sandboxDecision({ mode: 'auto', perms: noShell, support: yes }).enabled, false);
+  assert.equal(sandboxDecision({ mode: 'auto', perms: permissionProfile('edit', ['npm test*']), support: yes }).enabled, true);
+  const fallback = sandboxDecision({ mode: 'auto', perms: shell, support: no });
+  assert.deepEqual([fallback.enabled, fallback.warn], [false, true]);
+  assert.throws(() => sandboxDecision({ mode: 'on', perms: noShell, support: no }), /cannot run the agent as its own user \(darwin runner\)/);
+  assert.equal(sandboxDecision({ mode: 'on', perms: noShell, support: yes }).enabled, true);
+  assert.equal(sandboxDecision({ mode: 'off', perms: shell, support: yes }).enabled, false);
+  // the agent's environment comes from its private file, once, and replaces what sudo left
+  const envFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-env-')), 'agent-env.json');
+  fs.writeFileSync(envFile, JSON.stringify({ ANTHROPIC_API_KEY: 'k', HARNESS_STATE_DIR: '/s', PATH: '/ignored' }));
+  const target = { HARNESS_ENV_FILE: envFile, PATH: '/usr/bin', HOME: '/h', SUDO_USER: 'runner', SUDO_COMMAND: 'x' };
+  takeEnv(target);
+  assert.deepEqual(target, { ANTHROPIC_API_KEY: 'k', HARNESS_STATE_DIR: '/s', PATH: '/usr/bin', HOME: '/h' });
+  assert.ok(!fs.existsSync(envFile));
+  // what is uploaded holds no link
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-links-'));
+  fs.mkdirSync(path.join(dir, 'a'));
+  fs.writeFileSync(path.join(dir, 'a', 'kept.txt'), 'k');
+  fs.symlinkSync('/etc/hosts', path.join(dir, 'a', 'out'));
+  fs.symlinkSync(path.join(dir, 'a'), path.join(dir, 'loop'));
+  assert.equal(dropLinks(dir).length, 2);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['a']);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'a')), ['kept.txt']);
+});
+
+test('what the agent leaves cannot reach the runner: log lines, links, PATH', () => {
+  // a message cannot start a workflow command on a line of its own
+  for (const ev of [{ t: 'error', message: 'boom\n::error title=fake::x' }, { t: 'warning', message: 'a\r\n::add-mask::y' }, { t: 'tool_result', name: 'shell', error: 'e\n::stop-commands::z' }, { t: 'tool', name: 'x\n::error::n', input: {} }]) {
+    assert.ok(!describe(ev).includes('\n'), JSON.stringify(ev));
+  }
+  // results are read from regular files only
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-regular-'));
+  fs.writeFileSync(path.join(dir, 'secret'), 'SECRET');
+  fs.symlinkSync(path.join(dir, 'secret'), path.join(dir, 'structured_output.json'));
+  fs.symlinkSync(path.join(dir, 'secret'), path.join(dir, 'outbox.jsonl'));
+  assert.equal(readRegular(path.join(dir, 'structured_output.json')), null);
+  assert.equal(readRegular(path.join(dir, 'secret')), 'SECRET');
+  assert.deepEqual(collect(dir), { findings: [], inline: [], progress: '', structured: null });
+  // PATH without the directories the agent could write
+  assert.equal(safePath(['/w/repo/.venv/bin', '/usr/bin', '/w/repo', '/w/repository/bin', '/bin'].join(path.delimiter), ['/w/repo']), ['/usr/bin', '/w/repository/bin', '/bin'].join(path.delimiter));
+});
+
+test('modes are given back only to paths that are still plain files or directories', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-modes-'));
+  const file = path.join(dir, 'kept.txt');
+  const sub = path.join(dir, 'sub');
+  const now = path.join(dir, 'was-a-file');
+  fs.writeFileSync(file, 'k');
+  fs.mkdirSync(sub);
+  fs.symlinkSync('/etc/hosts', now); // a file the agent turned into a link
+  const listed = [`600 ${file}`, `755 ${sub}`, `644 ${now}`, `644 ${path.join(dir, 'gone.txt')}`].join('\0') + '\0';
+  const byMode = modesToRestore(listed);
+  assert.deepEqual(Object.fromEntries([...byMode].map(([m, ps]) => [m, ps])), { 600: [file], 755: [sub] });
+});
+
 test('pi tool list keeps MCP tools', () => {
   assert.deepEqual(toolList(permissionProfile('read-only')), ['read', 'grep', 'find', 'ls', 'mcp__*']);
   assert.ok(toolList(permissionProfile('full')).includes('bash'));
@@ -208,6 +310,50 @@ test('GitHub client: a dropped connection is retried for a read, never for a wri
   } finally {
     server.close();
   }
+});
+
+test('GitHub client: a long list gives its newest items when its length is known; a stalled request ends', async () => {
+  const pages = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname === '/stall') return; // never answers
+    const page = Number(url.searchParams.get('page'));
+    pages.push(page);
+    const items = Array.from({ length: 730 }, (_, i) => ({ id: i })).slice((page - 1) * 100, page * 100);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(items));
+  });
+  const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
+  const github = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1 });
+  const impatient = createClient({ token: 't', apiUrl: `http://127.0.0.1:${port}`, retryDelayMs: 1, timeoutMs: 100 });
+  try {
+    const newest = await github.paginate('/comments', { max: 200, total: 730 });
+    assert.deepEqual([newest.length, newest[0].id, newest.at(-1).id], [200, 530, 729]);
+    assert.deepEqual(pages, [6, 7, 8]); // the five pages before them are not requested
+    pages.length = 0;
+    const oldest = await github.paginate('/comments', { max: 200 }); // length unknown: as before
+    assert.deepEqual([oldest.length, oldest[0].id, oldest.at(-1).id], [200, 0, 199]);
+    assert.deepEqual(pages, [1, 2]);
+    assert.equal((await github.paginate('/comments', { max: 1000, total: 730 })).length, 730); // everything fits
+    await assert.rejects(impatient.post('/stall', { a: 1 }), /timeout|aborted/i);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('runner: raw output cannot issue workflow commands', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-runner-raw-'));
+  const lines = [];
+  const script = 'console.log("::add-mask::hello"); console.log("::error::made up by the agent");';
+  await runHarness({ adapter: getAdapter('opencode'), bin: process.execPath, args: ['-e', script], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: (l) => lines.push(l), showFullOutput: true });
+  const token = /^::stop-commands::([0-9a-f]{32})$/.exec(lines[0])?.[1];
+  assert.ok(token, lines[0]);
+  assert.deepEqual(lines.slice(1), ['::add-mask::hello', '::error::made up by the agent', `::${token}::`]); // commands are off in between
+  // without show_full_output nothing raw is printed, so nothing needs suspending
+  const quiet = [];
+  await runHarness({ adapter: getAdapter('opencode'), bin: process.execPath, args: ['-e', script], stdin: null, cwd: tmp, env: process.env, executionFile: path.join(tmp, 'exec2.jsonl'), limits: { maxSteps: 50, timeoutMinutes: 1, budgetUsd: 0 }, log: (l) => quiet.push(l) });
+  assert.ok(!quiet.some((l) => l.startsWith('::')), quiet.join('\n'));
 });
 
 test('opencode: web search gets a keyless provider only when web access is allowed', () => {

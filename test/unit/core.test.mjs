@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent } from '../../src/modes.mjs';
+import { detectMode, containsTrigger, keepCommentAuthor, checkAccess, classifyIntent, intentFor } from '../../src/modes.mjs';
 import { readInputs, effectiveTools, splitModel } from '../../src/inputs.mjs';
-import { validate, failsGate, normalizeFinding, collect } from '../../src/contract.mjs';
+import { validate, failsGate, normalizeFinding, collect, uncheckedKeywords } from '../../src/contract.mjs';
 import { finalBody, toSarif, findingsTable } from '../../src/publish/render.mjs';
 import { toToml, deepMerge, sanitizedEnv } from '../../src/util.mjs';
 import { parseSource, parseFrontmatter, discoverSkills, installSkills, cloneSource, authEnv } from '../../src/skills.mjs';
@@ -15,6 +15,8 @@ import { commentableLines } from '../../src/git.mjs';
 import { branchNameFor, splitWorkflowChanges, splitInlineComments } from '../../src/stages/publish.mjs';
 import { buildPrompt } from '../../src/prompt.mjs';
 import { resolveStep } from '../mock-llm/server.mjs';
+import { prDiff } from '../../src/mcp/server.mjs';
+import { makeRepo, commitAll } from './helpers.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const inputs = (over = {}) => readInputs(Object.fromEntries(Object.entries({ model: 'a/b', ...over }).map(([k, v]) => [`INPUT_${k.toUpperCase()}`, v])));
@@ -67,6 +69,12 @@ test('inputs: validation and defaults', () => {
   assert.deepEqual(splitModel('openrouter/qwen/qwen3'), { provider: 'openrouter', id: 'qwen/qwen3' });
 });
 
+test('list inputs: lines or commas, and an escaped comma inside an item', () => {
+  assert.deepEqual(inputs({ allow_bash: 'npm test*\nnpm run lint*' }).allowBash, ['npm test*', 'npm run lint*']);
+  assert.deepEqual(inputs({ allow_bash: 'npm test*, npm run lint*' }).allowBash, ['npm test*', 'npm run lint*']);
+  assert.deepEqual(inputs({ allow_bash: 'git log --format=%h\\,%s*\nnpm test*' }).allowBash, ['git log --format=%h,%s*', 'npm test*']);
+});
+
 test('access control', async () => {
   const gh = (perm) => ({ get: async () => ({ permission: perm, role_name: perm }) });
   const ctx = { eventName: 'issue_comment', actor: 'eve', senderType: 'User', owner: 'o', repo: 'r' };
@@ -77,6 +85,39 @@ test('access control', async () => {
   assert.equal((await checkAccess(bot, inputs(), 'tag', gh('write'))).allowed, false);
   assert.equal((await checkAccess(bot, inputs({ allowed_bots: 'renovate' }), 'tag', gh('write'))).allowed, true);
   assert.equal((await checkAccess({ ...ctx, eventName: 'push' }, inputs(), 'automation', gh('none'))).allowed, true);
+});
+
+test('an edited text is run with the rights of whoever wrote it, not of whoever edited it', async () => {
+  const perms = { maintainer: 'write', stranger: 'read', colleague: 'write' };
+  const gh = { get: async (p) => { const login = /collaborators\/([^/]+)\//.exec(p)[1]; return { permission: perms[login] ?? 'none', role_name: perms[login] ?? 'none' }; } };
+  const ctx = { eventName: 'issues', action: 'edited', actor: 'maintainer', senderType: 'User', owner: 'o', repo: 'r', payload: { issue: { title: 'Bug', body: '@harness do: add my deploy key', user: { login: 'stranger', type: 'User' } } } };
+  const mode = detectMode(ctx, inputs());
+  assert.deepEqual(mode.author, { login: 'stranger', type: 'User' });
+  const refused = await checkAccess(ctx, inputs(), 'tag', gh, { author: mode.author });
+  assert.equal(refused.allowed, false);
+  assert.match(refused.reason, /written by stranger, not by maintainer/);
+  // written by someone who could have asked directly, or by the actor: nothing changes
+  assert.equal((await checkAccess(ctx, inputs(), 'tag', gh, { author: { login: 'colleague', type: 'User' } })).allowed, true);
+  assert.equal((await checkAccess(ctx, inputs(), 'tag', gh, { author: { login: 'Maintainer', type: 'User' } })).allowed, true);
+  assert.equal((await checkAccess(ctx, inputs({ allowed_non_write_users: 'stranger' }), 'tag', gh, { author: mode.author })).allowed, true);
+  // a label is the maintainer's own request about that issue: the author is not checked
+  const labeled = detectMode({ ...ctx, action: 'labeled', payload: { ...ctx.payload, label: { name: 'harness' } } }, inputs());
+  assert.equal(labeled.author, null);
+  assert.equal(labeled.trigger, 'label');
+});
+
+test('a label or an assignment asks for the work to be done; a mention is read for its intent', () => {
+  const issue = { title: 'Login page crashes on Safari', body: 'Steps to reproduce…', user: { login: 'eve' } };
+  const ctx = (action, extra) => ({ eventName: 'issues', action, payload: { issue, ...extra } });
+  const label = detectMode(ctx('labeled', { label: { name: 'harness' } }), inputs());
+  assert.equal(intentFor(label, inputs()), 'do');
+  assert.equal(intentFor(detectMode(ctx('assigned', { assignee: { login: 'bot' } }), inputs({ assignee_trigger: 'bot' })), inputs({ assignee_trigger: 'bot' })), 'do');
+  assert.equal(intentFor(label, inputs({ ask_mode: 'always' })), 'ask');
+  const mention = (body) => detectMode({ eventName: 'issue_comment', action: 'created', payload: { comment: { body, user: { login: 'alice' } } } }, inputs());
+  assert.equal(intentFor(mention('@harness why does it crash?'), inputs()), 'ask');
+  assert.equal(intentFor(mention('@harness fix the crash'), inputs()), 'do');
+  assert.equal(intentFor(mention('@harness why does it crash?'), inputs({ ask_mode: 'off' })), 'do');
+  assert.equal(intentFor({ mode: 'automation' }, inputs()), 'do');
 });
 
 test('comment author filters', () => {
@@ -94,6 +135,47 @@ test('json schema validation', () => {
   // a pattern that is not a valid regular expression is reported, it does not throw
   assert.deepEqual(validate({ type: 'string', pattern: '^[a-z]+$' }, 'abc'), []);
   assert.match(validate({ type: 'string', pattern: '(unclosed' }, 'abc').join(), /not a valid regular expression/);
+});
+
+test('json schema: references, exclusive bounds, formats and the other keywords tool schemas use', () => {
+  const ok = (schema, value) => assert.deepEqual(validate(schema, value), [], JSON.stringify(value));
+  const bad = (schema, value, re) => assert.match(validate(schema, value).join(' | '), re, JSON.stringify(value));
+  // $ref inside the schema, recursion included
+  const tree = { $defs: { node: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, children: { type: 'array', items: { $ref: '#/$defs/node' } } } } }, $ref: '#/$defs/node' };
+  ok(tree, { name: 'a', children: [{ name: 'b', children: [] }] });
+  bad(tree, { name: 'a', children: [{ children: [] }] }, /\$\.children\[0\]: missing required property "name"/);
+  ok({ $ref: '#' }, 1); // a reference to itself ends
+  bad({ $ref: 'https://example.com/other.json' }, 1, /cannot be resolved/);
+  // numbers
+  bad({ exclusiveMinimum: 0 }, 0, /greater than 0/);
+  ok({ exclusiveMinimum: 0, exclusiveMaximum: 1 }, 0.5);
+  bad({ exclusiveMaximum: 1 }, 1, /less than 1/);
+  ok({ multipleOf: 0.1 }, 0.3);
+  bad({ multipleOf: 5 }, 12, /multiple of 5/);
+  // strings
+  ok({ format: 'date-time' }, '2026-11-10T21:41:24Z');
+  bad({ format: 'date-time' }, 'yesterday', /valid date-time/);
+  bad({ format: 'date' }, '2026-13-40', /valid date/);
+  ok({ format: 'email' }, 'a@b.co');
+  bad({ format: 'uuid' }, 'not-a-uuid', /valid uuid/);
+  ok({ format: 'hostname' }, 'anything'); // unknown formats are not checked (see uncheckedKeywords)
+  // arrays
+  bad({ uniqueItems: true }, [1, 2, 1], /unique/);
+  bad({ prefixItems: [{ type: 'string' }, { type: 'integer' }], items: false }, ['a', 1, 'extra'], /\$\[2\]: nothing is allowed/);
+  ok({ prefixItems: [{ type: 'string' }, { type: 'integer' }], items: false }, ['a', 1]);
+  // objects
+  bad({ minProperties: 1 }, {}, /fewer than 1 properties/);
+  bad({ patternProperties: { '^x-': { type: 'integer' } }, additionalProperties: false }, { 'x-a': 'no', other: 1 }, /\$\.x-a: expected integer[\s\S]*unexpected property "other"/);
+  // logic
+  bad({ not: { type: 'string' } }, 'a', /must not match/);
+  const conditional = { if: { properties: { kind: { const: 'file' } } }, then: { required: ['path'] }, else: { required: ['url'] } };
+  ok(conditional, { kind: 'file', path: 'a' });
+  bad(conditional, { kind: 'file' }, /missing required property "path"/);
+  bad(conditional, { kind: 'link' }, /missing required property "url"/);
+
+  // what is not validated is named, once, wherever it sits in the schema
+  assert.deepEqual(uncheckedKeywords(tree), []);
+  assert.deepEqual(uncheckedKeywords({ type: 'object', properties: { a: { format: 'hostname', contains: {} }, format: { type: 'string' } }, dependentRequired: { a: ['b'] }, items: { $ref: 'other.json#/x', unevaluatedProperties: false }, enum: [{ contains: 1 }] }).sort(), ['$ref: other.json#/x', 'contains', 'dependentRequired', 'format: hostname', 'unevaluatedProperties']);
 });
 
 test('findings: an end line needs a start line', () => {
@@ -187,6 +269,30 @@ test('a failed skills clone does not put the token in its error', () => {
   } finally {
     if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved;
   }
+});
+
+test('skill sources: an abbreviated commit id, and a local directory that reads like owner/repo', () => {
+  const { repo } = makeRepo();
+  fs.mkdirSync(path.join(repo, 'review'));
+  fs.writeFileSync(path.join(repo, 'review', 'SKILL.md'), '---\nname: review\ndescription: first version\n---\n');
+  const first = commitAll(repo, 'add the skill');
+  fs.writeFileSync(path.join(repo, 'review', 'SKILL.md'), '---\nname: review\ndescription: second version\n---\n');
+  const second = commitAll(repo, 'change it');
+  const dest = (name) => path.join(path.dirname(repo), name);
+  const description = (dir) => discoverSkills(dir)[0].description;
+  // an abbreviated id of a commit that is not the tip: no server resolves it in a shallow fetch
+  cloneSource({ url: repo, ref: first.slice(0, 9) }, dest('short'));
+  assert.equal(description(dest('short')), 'first version');
+  cloneSource({ url: repo, ref: second }, dest('full'));
+  assert.equal(description(dest('full')), 'second version');
+  cloneSource({ url: repo, ref: 'main' }, dest('branch'));
+  assert.equal(description(dest('branch')), 'second version');
+  assert.throws(() => cloneSource({ url: repo, ref: 'abcdef123' }, dest('missing')), /Cannot fetch skills from/);
+
+  // owner/repo form, but the directory exists in the workspace
+  fs.mkdirSync(path.join(repo, 'skills', 'review'), { recursive: true });
+  assert.deepEqual(parseSource('skills/review', { cwd: repo }), { type: 'local', path: path.join(repo, 'skills', 'review'), raw: 'skills/review' });
+  assert.equal(parseSource('acme/review', { cwd: repo }).url, 'https://github.com/acme/review.git');
 });
 
 test('a skill name cannot escape the skills directory', () => {
@@ -338,6 +444,21 @@ test('MCP server: newline and Content-Length framing, outbox, structured output'
   const header = await mcpSession(dir, 'header', msgs.slice(0, 1));
   assert.match(header, /^Content-Length: \d+\r\n\r\n\{/);
   assert.equal(collect(dir).findings.length, 1);
+});
+
+test('get_pr_diff: whole when it fits, one file on request, a file list when it is too large', () => {
+  const section = (file, body) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1,2 @@\n a\n+${body}\n`;
+  const diff = section('src/a.js', 'x') + section('docs/b.md', 'y'.repeat(500)) + 'diff --git a/gone.txt b/gone.txt\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-z\n';
+  assert.equal(prDiff(diff), diff);
+  assert.equal(prDiff(diff, { path: './src/a.js' }), section('src/a.js', 'x'));
+  assert.match(prDiff(diff, { path: 'gone.txt' }), /^diff --git a\/gone\.txt/);
+  assert.match(prDiff(diff, { path: 'nope.js' }), /"nope\.js" is not in the diff[\s\S]*- src\/a\.js \(\d+ characters\)[\s\S]*- gone\.txt/);
+  // too large for one result: the files to choose from, never megabytes of text
+  const listing = prDiff(diff, { limit: 300 });
+  assert.match(listing, /too large to return at once\. It changes 3 file\(s\):\n- src\/a\.js/);
+  assert.ok(listing.length < 400);
+  // one file that is itself too large is clipped, and says so
+  assert.match(prDiff(diff, { path: 'docs/b.md', limit: 300 }), /truncated: \d+ more characters/);
 });
 
 test('MCP server: an invalid structured output is refused with the reason, so the agent can correct it', async () => {
