@@ -31,7 +31,7 @@ export function sandboxSupport() {
   if (process.platform !== 'linux') return { ok: false, reason: `${process.platform} runner` };
   if (typeof process.getuid === 'function' && process.getuid() === 0) return { ok: false, reason: 'the job already runs as root' };
   if (!trySudo(['true'])) return { ok: false, reason: 'no passwordless sudo' };
-  if (!trySudo(['sh', '-c', 'command -v useradd && command -v userdel && command -v pgrep && command -v find'])) return { ok: false, reason: 'useradd / userdel / pgrep / find not available' };
+  if (!trySudo(['sh', '-c', 'command -v useradd && command -v userdel && command -v pgrep && command -v pkill && command -v find'])) return { ok: false, reason: 'useradd / userdel / pgrep / pkill / find not available' };
   return { ok: true, reason: '' };
 }
 
@@ -130,21 +130,30 @@ export function takeEnv(target = process.env) {
   for (const [k, v] of Object.entries(env)) if (!own.includes(k) || target[k] === undefined) target[k] = v;
 }
 
-const alive = (user) => spawnSync('pgrep', ['-u', user]).status === 0;
+/** What still runs as `user`, as `pgrep -a` prints it. */
+function remaining(user) {
+  const r = spawnSync('pgrep', ['-u', user, '-a'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : [];
+}
 
 /**
- * Ends every process of the agent's user, and its cron jobs. `kill -1` sent as that user reaches
- * all of its processes at once, so a process that keeps forking cannot slip between a listing and
- * a kill. Returns false if some process is still there.
+ * Ends every process of the agent's user, and its cron jobs. Two ways, because a runner may
+ * refuse either: `pkill` by uid as root, and `kill -1` sent as that user through a shell (its
+ * built-in, so no command-line parsing of `-1` is involved), which reaches all of its processes
+ * at once, so one that keeps forking cannot slip between a listing and a kill.
+ * @returns {{ clean: boolean, left: string[] }}
  */
 export function killAgent(sandbox) {
-  if (!sandbox?.user) return true;
+  if (!sandbox?.user) return { clean: true, left: [] };
   trySudo(['crontab', '-r', '-u', sandbox.user]);
-  for (let i = 0; i < 10 && alive(sandbox.user); i++) {
-    trySudo(['-u', sandbox.user, 'kill', '-KILL', '-1']);
-    if (alive(sandbox.user)) spawnSync('sleep', ['0.5']);
+  let left = remaining(sandbox.user);
+  for (let i = 0; i < 10 && left.length; i++) {
+    trySudo(['pkill', '-KILL', '-u', sandbox.user]);
+    trySudo(['-u', sandbox.user, 'sh', '-c', 'kill -KILL -1 2>/dev/null; exit 0']);
+    left = remaining(sandbox.user);
+    if (left.length) spawnSync('sleep', ['0.5']);
   }
-  return !alive(sandbox.user);
+  return { clean: left.length === 0, left };
 }
 
 /** Removes every symbolic link under `dir`: what is read or uploaded from it stays inside it. */
@@ -185,8 +194,8 @@ function restoreModes(file) {
  */
 export function reclaim(sandbox, { uploads = [], removeUser = false, log = () => {} } = {}) {
   if (!sandbox?.user) return { clean: true, undone: [] };
-  const clean = killAgent(sandbox);
-  if (!clean) log(`Some processes of ${sandbox.user} could not be stopped.`);
+  const { clean, left } = killAgent(sandbox);
+  if (!clean) log(`Some processes of ${sandbox.user} could not be stopped: ${left.slice(0, 5).join(' | ')}`);
   const dirs = [...sandbox.writable, ...sandbox.sticky].filter((d) => fs.existsSync(d));
   if (dirs.length) trySudo(['chown', '-R', '--no-dereference', '--preserve-root', sandbox.owner, ...dirs]);
   for (const d of [...new Set([...sandbox.sticky, ...uploads])]) {
