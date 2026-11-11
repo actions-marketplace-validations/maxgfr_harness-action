@@ -108,6 +108,7 @@ export function readInputs(env = process.env, { files = true } = {}) {
     sarif: getBool('sarif', false, o),
     displayReport: getBool('display_report', false, o),
     showFullOutput: getBool('show_full_output', false, o),
+    sandbox: oneOf('sandbox', getInput('sandbox', o) || 'auto', ['auto', 'on', 'off']),
     workingDirectory: getInput('working_directory', o) || '.',
   };
 }

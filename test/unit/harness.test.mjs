@@ -8,6 +8,7 @@ import { createClient } from '../../src/github/api.mjs';
 import { runHarness } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
 import { lockFile, manifestOf } from '../../src/harness/install.mjs';
+import { sandboxDecision, dropLinks } from '../../src/sandbox.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -154,6 +155,31 @@ test('every pinned harness version has a lockfile of its whole dependency tree',
     // (a bundled package ships inside its parent's tarball, which has the hash)
     for (const [where, p] of Object.entries(lock.packages)) if (where && !p.link && !p.inBundle) assert.ok(p.integrity, `${id}: ${where} has no integrity hash`);
   }
+});
+
+test('the agent gets its own user whenever it can run code, if the runner allows it', () => {
+  const yes = () => ({ ok: true, reason: '' });
+  const no = () => ({ ok: false, reason: 'darwin runner' });
+  const shell = permissionProfile('full');
+  const noShell = permissionProfile('edit');
+  assert.equal(sandboxDecision({ mode: 'auto', perms: shell, support: yes }).enabled, true);
+  assert.equal(sandboxDecision({ mode: 'auto', perms: noShell, loopUntil: 'npm test', support: yes }).enabled, true); // the check runs code the agent wrote
+  assert.equal(sandboxDecision({ mode: 'auto', perms: noShell, support: yes }).enabled, false);
+  assert.equal(sandboxDecision({ mode: 'auto', perms: permissionProfile('edit', ['npm test*']), support: yes }).enabled, true);
+  const fallback = sandboxDecision({ mode: 'auto', perms: shell, support: no });
+  assert.deepEqual([fallback.enabled, fallback.warn], [false, true]);
+  assert.throws(() => sandboxDecision({ mode: 'on', perms: noShell, support: no }), /cannot run the agent as its own user \(darwin runner\)/);
+  assert.equal(sandboxDecision({ mode: 'on', perms: noShell, support: yes }).enabled, true);
+  assert.equal(sandboxDecision({ mode: 'off', perms: shell, support: yes }).enabled, false);
+  // what is uploaded holds no link
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-links-'));
+  fs.mkdirSync(path.join(dir, 'a'));
+  fs.writeFileSync(path.join(dir, 'a', 'kept.txt'), 'k');
+  fs.symlinkSync('/etc/hosts', path.join(dir, 'a', 'out'));
+  fs.symlinkSync(path.join(dir, 'a'), path.join(dir, 'loop'));
+  assert.equal(dropLinks(dir).length, 2);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['a']);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'a')), ['kept.txt']);
 });
 
 test('pi tool list keeps MCP tools', () => {

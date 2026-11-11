@@ -9,6 +9,7 @@ import { collect, failsGate, validate } from '../contract.mjs';
 import { treeChanges, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
+import { reclaim } from '../sandbox.mjs';
 
 const readJson = (f, d = null) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
 
@@ -188,6 +189,15 @@ export async function publish({ env = process.env, stateDir }) {
   const { ctx } = context;
   const workDir = context.workDir;
   const reportDir = path.join(stateDir, 'report');
+  // The agent ran as its own user: its processes end now, before anything here reads what it
+  // left or the credentials come back, and its files become the runner's again.
+  if (context.sandbox) {
+    reclaim(context.sandbox, {
+      dirs: [isRepo(workDir) ? repoRoot(workDir) : workDir, stateDir, context.session?.dir],
+      uploads: [reportDir, context.session?.dir],
+      log: core.info,
+    });
+  }
   fs.mkdirSync(reportDir, { recursive: true });
   const github = createClient({ token: inputs.githubToken });
   const runFile = path.join(stateDir, 'run.json');

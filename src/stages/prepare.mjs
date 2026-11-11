@@ -12,7 +12,11 @@ import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../har
 import { resolveEndpoint } from '../harness/providers.mjs';
 import { installSkills, repositorySkillNames } from '../skills.mjs';
 import { buildPrompt, buildFollowupPrompt } from '../prompt.mjs';
-import { git, isRepo, headSha, stripCredentials } from '../git.mjs';
+import { git, isRepo, headSha, stripCredentials, repoRoot } from '../git.mjs';
+import { sandboxDecision, setupSandbox } from '../sandbox.mjs';
+import { fileURLToPath } from 'node:url';
+
+const ACTION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 import { TRACKING_MARKER, stickyMarker, workingBody } from '../publish/render.mjs';
 import { truncate } from '../util.mjs';
 import { toolDefinitions } from '../mcp/server.mjs';
@@ -200,6 +204,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const loop = intent === 'ask' && tools === 'read-only' ? { maxIterations: 1, until: '' } : loopSettings(inputs);
   core.info(`Intent: ${intent === 'ask' ? 'answer (read-only, recommendations)' : 'act'} · tools: ${tools}.`);
   const perms = permissionProfile(tools, inputs.allowBash);
+  // (decided now: `sandbox: on` on a runner that cannot must fail before anything is posted)
+  const isolation = sandboxDecision({ mode: inputs.sandbox, perms, loopUntil: loop.until });
+  if (isolation.warn) core.warning(`The agent can run commands, but it runs as the job's own user: ${isolation.reason}. See docs/security.md.`);
   const model = { ...splitModel(inputs.model), raw: inputs.model };
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
   const isPR = ctx.isPR;
@@ -391,6 +398,22 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
 
     // --- remove persisted git credentials for the agent run --------------------------------------
     const removedCredentials = repoOk ? stripCredentials(workDir) : null;
+
+    // --- the agent's own user -------------------------------------------------------------------
+    let sandbox = null;
+    if (isolation.enabled) {
+      sandbox = await core.group('Agent user', () => setupSandbox({
+        // what the agent changes, and where the Run step writes
+        writable: [repoOk ? repoRoot(workDir) : workDir, home, ...['codex-home', 'pi-agent', 'pi-sessions'].map((d) => path.join(stateDir, d)).filter((d) => fs.existsSync(d)), ...(thread0 ? [sessionDir] : [])],
+        // it adds its results next to the files Prepare wrote, which it cannot replace
+        sticky: [stateDir, reportDir],
+        readable: [path.dirname(bin).replace(/\/node_modules\/\.bin$/, ''), ACTION_ROOT, process.execPath],
+        log: core.info,
+      }));
+      core.info(`The agent runs as ${sandbox.user} (${isolation.reason}).`);
+    } else {
+      core.info(`The agent runs as the job's user (${isolation.reason}).`);
+    }
     if (removedCredentials?.headers.length || removedCredentials?.includes.length) core.info('Persisted git credentials removed for the agent run (restored afterwards).');
 
     // Token-free plan for the run stage.
@@ -409,6 +432,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       limits: { maxSteps: inputs.maxSteps, timeoutMinutes: inputs.timeoutMinutes, budgetUsd: inputs.budgetUsd },
       showFullOutput: inputs.showFullOutput,
       prepared: { ...prepared, files: undefined },
+      sandbox,
     });
     save('context.json', {
       ...base,
@@ -432,6 +456,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       targetBranch,
       openPr: inputs.openPr,
       jsonSchema: inputs.jsonSchema,
+      sandbox,
     });
     return {
       run: true,

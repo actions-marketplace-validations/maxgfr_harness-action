@@ -222,6 +222,10 @@ inputs:
     description: 'Directory the agent works in, relative to the workspace.'
     required: false
     default: '.'
+  sandbox:
+    description: 'Run the agent as its own system user, so that code it executes cannot reach the steps that hold the GitHub token: `auto` (default) when the agent can run commands (a shell, `loop_until`) and the runner allows it (Linux with passwordless sudo, as on GitHub-hosted runners), `on` (fail if the runner cannot), `off`.'
+    required: false
+    default: 'auto'
   setup_node:
     description: 'Install Node.js 24 with actions/setup-node (set false when your job already provides Node ≥ 22.19).'
     required: false
