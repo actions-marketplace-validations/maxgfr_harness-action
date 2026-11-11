@@ -61,12 +61,9 @@ export function runCheck(command, { cwd, env, timeoutMinutes = 15 }) {
   });
 }
 
-export function feedbackPrompt({ check, iteration, max, resumable, original, previousText }) {
+/** The message of the next loop turn. The session is resumed, so it only says what is missing. */
+export function feedbackPrompt({ check, iteration, max }) {
   const L = [TURN_MARKER];
-  if (!resumable) {
-    // a harness that cannot resume a session: restate the task and what happened.
-    L.push(original, '', '## Previous attempt', '', previousText?.trim() || '_(no final message)_', '');
-  }
   if (check) {
     L.push(`The completion check \`${check.command}\` failed (exit code ${check.code}) after your last turn. Its output (last 8000 characters):`, '', '```', truncate(check.output.slice(-8000), 8000), '```', '', 'Find the cause, fix it, and verify before you finish.');
   } else {
@@ -101,13 +98,12 @@ export async function run({ stateDir, env = process.env }) {
 
   const loop = plan.loop ?? { maxIterations: 1 };
   const session = plan.session ?? { enabled: false };
-  const resumable = Boolean(adapter.resumable);
   let sessionId = null;
   let resumed = false;
 
   if (adapter.beforeRun) await adapter.beforeRun({ ...helper, log: core.info }).catch((err) => core.info(`beforeRun: ${err.message}`));
 
-  if (session.enabled && resumable && session.dir) {
+  if (session.enabled && session.dir) {
     const meta = path.join(session.dir, 'meta.json');
     let saved = null;
     try { saved = JSON.parse(fs.readFileSync(meta, 'utf8')); } catch {}
@@ -149,7 +145,7 @@ export async function run({ stateDir, env = process.env }) {
         budgetUsd: plan.limits.budgetUsd ? Math.max(0.000001, plan.limits.budgetUsd - total.cost) : 0,
       };
       const completesBefore = readOutbox(stateDir).filter((e) => e.kind === 'complete').length;
-      const { args, stdin, sessionId: chosen } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId: resumable ? sessionId : null, timeoutMinutes: limits.timeoutMinutes });
+      const { args, stdin, sessionId: chosen } = adapter.command({ prepared: plan.prepared, prompt, extraArgs: plan.extraArgs, workDir: plan.workDir, sessionId, timeoutMinutes: limits.timeoutMinutes });
       if (chosen) sessionId = chosen; // harnesses where the action picks the session id (OpenClaw)
       if (loop.maxIterations > 1) core.info(`\n━━ iteration ${i}/${loop.maxIterations} ━━`);
       core.info(`▶ ${plan.harness} ${args.filter((a) => a !== prompt && a !== '-').join(' ').slice(0, 300)} …`);
@@ -193,10 +189,10 @@ export async function run({ stateDir, env = process.env }) {
         if (done) { loopResult = 'complete'; break; }
       }
       if (i === loop.maxIterations) break;
-      prompt = feedbackPrompt({ check, iteration: i + 1, max: loop.maxIterations, resumable, original: firstPrompt, previousText: acc.finalText });
+      prompt = feedbackPrompt({ check, iteration: i + 1, max: loop.maxIterations });
     }
   } finally {
-    if (session.enabled && resumable && sessionId && session.dir && last?.status !== undefined) {
+    if (session.enabled && sessionId && session.dir && last?.status !== undefined) {
       fs.mkdirSync(session.dir, { recursive: true });
       const ok = await adapter.exportSession({ ...helper, dir: session.dir, sessionId }).catch(() => false);
       if (ok) {

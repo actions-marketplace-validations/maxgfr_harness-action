@@ -68,7 +68,6 @@ export default {
     return { args: ['--mode', 'json', '--session-dir', prepared.sessionDir, ...(sessionId ? ['--session', sessionId] : []), ...prepared.args, ...extraArgs, prompt], stdin: null };
   },
 
-  resumable: true,
 
   async importSession({ dir, prepared }) {
     const saved = path.join(dir, 'pi-sessions');

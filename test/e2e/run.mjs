@@ -307,7 +307,7 @@ async function conversationLoop(harness) {
     ['run 1: publish green', first.pub.code === 0],
   ];
   let second = null;
-  if (getAdapterResumable(harness)) {
+  {
     // What action.yml's upload-artifact step does: zip the session dir under the given name. Then
     // the dir is wiped, so run 2 can only resume through the artifact API.
     const artifactName = first.pub.outputs.session_artifact ?? '';
@@ -340,8 +340,6 @@ async function conversationLoop(harness) {
   }
   return failed.length === 0;
 }
-
-const getAdapterResumable = () => true; // every supported harness resumes its sessions
 
 let ok = true;
 for (const h of HARNESSES) {

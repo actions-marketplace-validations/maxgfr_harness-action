@@ -71,7 +71,6 @@ export default {
     if (!model.provider && !endpoint.custom) throw new Error('openclaw needs `model` as provider/model, e.g. anthropic/claude-sonnet-5-5');
   },
   streaming: false,
-  resumable: true,
   install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare({ home, workDir, model, endpoint, perms, mcpServers, harnessConfig, warn }) {

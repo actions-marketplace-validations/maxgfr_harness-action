@@ -85,7 +85,6 @@ export default {
     return { args: sessionId ? [...base, 'resume', sessionId, '-'] : [...base, '-'], stdin: prompt };
   },
 
-  resumable: true,
 
   async importSession({ dir, prepared }) {
     const saved = path.join(dir, 'codex-sessions');

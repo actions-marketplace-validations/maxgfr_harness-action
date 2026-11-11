@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { createGitHubMock } from '../mock-github/server.mjs';
 import { createClient } from '../../src/github/api.mjs';
 import { restoreSessionArtifact } from '../../src/github/session-store.mjs';
-import { resolveHarness, permissionProfile } from '../../src/harness/index.mjs';
+import { resolveHarness, permissionProfile, getAdapter } from '../../src/harness/index.mjs';
 import { buildConfig as oc2Config, permissionRules, mcpReady } from '../../src/harness/opencode.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
 import { readInputs, loopSettings, sessionThread, sessionCachePrefix } from '../../src/inputs.mjs';
@@ -86,15 +86,19 @@ test('conversation key', () => {
 });
 
 test('feedback prompts', () => {
-  const check = feedbackPrompt({ check: { command: 'npm test', code: 1, output: 'FAIL x' }, iteration: 2, max: 5, resumable: true });
+  const check = feedbackPrompt({ check: { command: 'npm test', code: 1, output: 'FAIL x' }, iteration: 2, max: 5 });
   assert.ok(check.startsWith(TURN_MARKER));
   assert.match(check, /npm test.*exit code 1/);
   assert.match(check, /FAIL x/);
-  assert.doesNotMatch(check, /Previous attempt/);
-  const fresh = feedbackPrompt({ iteration: 2, max: 3, resumable: false, original: 'ORIGINAL TASK', previousText: 'did half' });
-  assert.match(fresh, /ORIGINAL TASK/);
-  assert.match(fresh, /did half/);
-  assert.match(fresh, /task_complete/);
+  assert.match(check, /\(iteration 2 of 5\)$/);
+  const undeclared = feedbackPrompt({ iteration: 2, max: 3 });
+  assert.match(undeclared, /task_complete/);
+  // every harness resumes its session: the loop relies on it
+  for (const id of ['opencode', 'codex', 'pi', 'openclaw']) {
+    const a = getAdapter(id);
+    assert.equal(typeof a.importSession, 'function', id);
+    assert.equal(typeof a.exportSession, 'function', id);
+  }
 });
 
 test('completion check runner', async () => {
