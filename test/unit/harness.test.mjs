@@ -5,10 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { createClient } from '../../src/github/api.mjs';
-import { runHarness } from '../../src/runner.mjs';
+import { runHarness, describe } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
 import { lockFile, manifestOf } from '../../src/harness/install.mjs';
-import { sandboxDecision, dropLinks, takeEnv } from '../../src/sandbox.mjs';
+import { sandboxDecision, dropLinks, takeEnv, safePath } from '../../src/sandbox.mjs';
+import { readRegular } from '../../src/util.mjs';
+import { collect } from '../../src/contract.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -17,7 +19,7 @@ import { readInputs } from '../../src/inputs.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
-import { redactMcpSecrets, validateRun } from '../../src/stages/prepare.mjs';
+import { redactMcpSecrets, validateRun, checkSkillAvailable } from '../../src/stages/prepare.mjs';
 import { toToml } from '../../src/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
@@ -127,7 +129,7 @@ test('mistakes the inputs alone show are reported before anything is posted or i
     const i = readInputs(Object.fromEntries(Object.entries({ model: 'anthropic/m', harness, ...over }).map(([k, x]) => [`INPUT_${k.toUpperCase()}`, x])));
     const model = { provider: i.model.split('/')[0], id: i.model.split('/').slice(1).join('/') };
     if (!i.model.includes('/')) Object.assign(model, { provider: '', id: i.model });
-    return () => validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }), inputs: i, workDir: work });
+    return () => { validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }) }); checkSkillAvailable({ inputs: i, workDir: work }); };
   };
   assert.throws(v('codex'), /only speaks OpenAI-compatible/);
   assert.throws(v('codex', { model: 'acme/m' }), /does not know provider "acme"/);
@@ -187,6 +189,23 @@ test('the agent gets its own user whenever it can run code, if the runner allows
   assert.equal(dropLinks(dir).length, 2);
   assert.deepEqual(fs.readdirSync(dir).sort(), ['a']);
   assert.deepEqual(fs.readdirSync(path.join(dir, 'a')), ['kept.txt']);
+});
+
+test('what the agent leaves cannot reach the runner: log lines, links, PATH', () => {
+  // a message cannot start a workflow command on a line of its own
+  for (const ev of [{ t: 'error', message: 'boom\n::error title=fake::x' }, { t: 'warning', message: 'a\r\n::add-mask::y' }, { t: 'tool_result', name: 'shell', error: 'e\n::stop-commands::z' }, { t: 'tool', name: 'x\n::error::n', input: {} }]) {
+    assert.ok(!describe(ev).includes('\n'), JSON.stringify(ev));
+  }
+  // results are read from regular files only
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-regular-'));
+  fs.writeFileSync(path.join(dir, 'secret'), 'SECRET');
+  fs.symlinkSync(path.join(dir, 'secret'), path.join(dir, 'structured_output.json'));
+  fs.symlinkSync(path.join(dir, 'secret'), path.join(dir, 'outbox.jsonl'));
+  assert.equal(readRegular(path.join(dir, 'structured_output.json')), null);
+  assert.equal(readRegular(path.join(dir, 'secret')), 'SECRET');
+  assert.deepEqual(collect(dir), { findings: [], inline: [], progress: '', structured: null });
+  // PATH without the directories the agent could write
+  assert.equal(safePath(['/w/repo/.venv/bin', '/usr/bin', '/w/repo', '/w/repository/bin', '/bin'].join(path.delimiter), ['/w/repo']), ['/usr/bin', '/w/repository/bin', '/bin'].join(path.delimiter));
 });
 
 test('pi tool list keeps MCP tools', () => {

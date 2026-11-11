@@ -1,13 +1,14 @@
 // Outbox replay, findings normalisation and a small JSON-schema validator.
 import fs from 'node:fs';
 import path from 'node:path';
+import { readRegular } from './util.mjs';
 
 const SEV_RANK = { notice: 1, warning: 2, error: 3 };
 
 export function readOutbox(stateDir) {
-  const file = path.join(stateDir, 'outbox.jsonl');
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const text = readRegular(path.join(stateDir, 'outbox.jsonl'));
+  if (text === null) return [];
+  return text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
 export function normalizeFinding(f) {
@@ -32,8 +33,8 @@ export function collect(stateDir) {
   const inline = outbox.filter((e) => e.kind === 'inline').map((e) => e.comment).filter((c) => c?.path && c?.body && c?.line);
   const progress = outbox.filter((e) => e.kind === 'progress').at(-1)?.markdown ?? '';
   let structured = null;
-  const so = path.join(stateDir, 'structured_output.json');
-  if (fs.existsSync(so)) { try { structured = JSON.parse(fs.readFileSync(so, 'utf8')); } catch {} }
+  const so = readRegular(path.join(stateDir, 'structured_output.json'));
+  if (so !== null) { try { structured = JSON.parse(so); } catch {} }
   return { findings, inline, progress, structured };
 }
 

@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { commitChanges } from '../../src/stages/publish.mjs';
-import { commitViaApi, stripCredentials, restoreCredentials } from '../../src/git.mjs';
+import crypto from 'node:crypto';
+import { commitViaApi, stripCredentials, restoreCredentials, privateGitDir, snapshotGit, restoreGit, treeChanges } from '../../src/git.mjs';
 import { finalBody } from '../../src/publish/render.mjs';
 import { inputs, g, commitAll, makeRepo, runPublish } from './helpers.mjs';
 
@@ -239,6 +240,83 @@ test('checkout credentials are removed from the repository and from every submod
   fs.symlinkSync(decoy, configs[1]);
   restoreCredentials(repo, again, 'ghs_newtoken');
   assert.equal(fs.readFileSync(decoy, 'utf8'), '');
+});
+
+test("publish reads the checkout through its own git directory and the root prepare recorded", async () => {
+  const { tmp, repo, base } = makeRepo();
+  // what prepare records, before the agent runs
+  const gitDir = privateGitDir(repo, path.join(tmp, 'private-git'));
+  // the agent's `.git`: a partial-clone remote whose ssh command is a program of its own, and a
+  // worktree pointing at the whole filesystem
+  const sentinel = path.join(tmp, 'ran');
+  const ssh = path.join(tmp, 'ssh.sh');
+  fs.writeFileSync(ssh, `#!/bin/sh\ntouch ${sentinel}\n`, { mode: 0o755 });
+  g(repo, 'config', 'remote.evil.url', 'ssh://example.invalid/x');
+  g(repo, 'config', 'remote.evil.promisor', 'true');
+  g(repo, 'config', 'extensions.partialClone', 'evil');
+  g(repo, 'config', 'core.sshCommand', ssh);
+  g(repo, 'config', 'core.fsmonitor', ssh);
+  g(repo, 'config', 'core.worktree', '/');
+  fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n\nchanged\n');
+  const { github } = await commit(repo, base, { context: { repoRoot: repo, gitDir } });
+  assert.ok(!fs.existsSync(sentinel), 'a program from the checkout configuration ran');
+  assert.deepEqual(github.calls.commits[0].fileChanges.additions.map((a) => a.path), ['README.md']);
+});
+
+test("the checkout's git configuration and hooks are put back as they were before the run", () => {
+  const { tmp, repo } = makeRepo();
+  g(repo, 'config', 'user.name', 'kept');
+  const manifest = snapshotGit(repo, path.join(tmp, 'snapshot'));
+  const configBefore = fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8');
+  // the agent's changes
+  g(repo, 'config', 'core.sshCommand', '/tmp/evil');
+  fs.writeFileSync(path.join(repo, '.git', 'hooks', 'post-checkout'), '#!/bin/sh\necho evil\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(repo, '.git', 'commondir'), '/tmp/elsewhere\n');
+  fs.chmodSync(path.join(repo, '.git', 'config'), 0o666);
+  const undone = restoreGit(manifest);
+  assert.equal(fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8'), configBefore);
+  assert.equal(fs.statSync(path.join(repo, '.git', 'config')).mode & 0o777, 0o644);
+  assert.ok(!fs.existsSync(path.join(repo, '.git', 'hooks', 'post-checkout')));
+  assert.ok(!fs.existsSync(path.join(repo, '.git', 'commondir')));
+  assert.deepEqual(undone.sort(), ['.git/commondir', '.git/config']);
+  // a `.git` replaced by the agent's own is removed, never read
+  fs.renameSync(path.join(repo, '.git'), path.join(tmp, 'moved'));
+  fs.mkdirSync(path.join(repo, '.git'));
+  fs.writeFileSync(path.join(repo, '.git', 'config'), '[core]\n\tfsmonitor = /tmp/evil\n');
+  assert.match(restoreGit(manifest).join(), /\.git was replaced/);
+  assert.ok(!fs.existsSync(path.join(repo, '.git')));
+});
+
+test('a file Git LFS checked out is unchanged when its content is the object its pointer names', async () => {
+  const { repo } = makeRepo();
+  const content = 'the real binary content\n';
+  const oid = crypto.createHash('sha256').update(content).digest('hex');
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+  // committed as pointers (no filter configured here: git stores the text as it is)
+  fs.writeFileSync(path.join(repo, 'same.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${content.length}\n`);
+  fs.writeFileSync(path.join(repo, 'edited.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${content.length}\n`);
+  const base = commitAll(repo, 'lfs pointers');
+  // what `git lfs` leaves in the working tree: the content
+  fs.writeFileSync(path.join(repo, 'same.bin'), content);
+  fs.writeFileSync(path.join(repo, 'edited.bin'), 'changed by the agent\n');
+  const changes = treeChanges(repo, base);
+  assert.deepEqual(changes.lfs, ['edited.bin']);
+  assert.deepEqual(changes.additions, []);
+  assert.doesNotMatch(changes.patch, /same\.bin/);
+  // nothing but checked-out LFS files: nothing changed at all
+  fs.writeFileSync(path.join(repo, 'edited.bin'), content);
+  assert.equal(treeChanges(repo, base).any, false);
+});
+
+test('credentials are stripped in a linked worktree too (they live in the common git directory)', () => {
+  const { tmp, repo } = makeRepo();
+  const header = 'http.https://github.com/.extraheader';
+  g(repo, 'config', '--local', header, 'AUTHORIZATION: basic c2VjcmV0');
+  const linked = path.join(tmp, 'linked');
+  g(repo, 'worktree', 'add', '-q', '--detach', linked);
+  const removed = stripCredentials(linked);
+  assert.equal(removed.headers.length, 1);
+  assert.doesNotMatch(fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8'), /c2VjcmV0/);
 });
 
 test('an unchanged tree commits nothing', async () => {

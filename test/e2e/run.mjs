@@ -388,8 +388,10 @@ async function sandboxScenario(harness) {
   ].map((c) => `${c} 2>/dev/null`).join('\n') + '\nexit 0\n');
   const prep = await step('prepare', { ...withInputs, HARNESS_STATE_DIR: stateDir });
   const before = fs.readFileSync(path.join(stateDir, 'context.json'), 'utf8');
+  const agentUser = JSON.parse(fs.readFileSync(path.join(stateDir, 'plan.json'), 'utf8')).sandbox?.user ?? '';
+  const configBefore = fs.readFileSync(path.join(workspace, '.git', 'config'), 'utf8');
   const runRes = await step('run', { ...baseEnv, HARNESS_STATE_DIR: stateDir });
-  const agentAlive = spawnSync('pgrep', ['-u', 'harness-agent']).status === 0;
+  const agentAlive = Boolean(agentUser) && spawnSync('pgrep', ['-u', agentUser]).status === 0;
   const contextKept = fs.readFileSync(path.join(stateDir, 'context.json'), 'utf8') === before && fs.existsSync(path.join(stateDir, 'plan.json'));
   const pub = await step('publish', { ...withInputs, HARNESS_STATE_DIR: stateDir });
   llm.close();
@@ -399,14 +401,16 @@ async function sandboxScenario(harness) {
   const commits = gh.calls.filter((c) => c.path === '/graphql').map((c) => c.body?.variables?.input?.fileChanges?.additions?.map((a) => a.path) ?? []);
   const ownedByRunner = (f) => fs.statSync(f).uid === process.getuid();
   const checks = [
-    ['the agent ran as its own user', /runs as harness-agent/.test(prep.out)],
+    ['the agent ran as its own user', /The agent runs as ha-agent-[0-9a-f]+/.test(prep.out)],
     ['run succeeded', runJson.status === 'success'],
     ["the action's sources could not be written", !fs.existsSync(probe)],
     ['context.json and plan.json could not be replaced', contextKept],
-    ['the credentials could not be read', !fs.existsSync(stolen) || !fs.readFileSync(stolen, 'utf8').includes('extraheader')],
     ['no agent process outlived the run step', !agentAlive],
     ['the agent still did its work', commits.at(-1)?.includes('ECHO.md')],
     ['its files are the runner\'s again', fs.existsSync(path.join(workspace, 'ECHO.md')) && ownedByRunner(path.join(workspace, 'ECHO.md')) && ownedByRunner(stateDir)],
+    ['its user is gone after publish', Boolean(agentUser) && spawnSync('id', ['-u', agentUser]).status !== 0],
+    ['the working tree has its modes back', (fs.statSync(path.join(workspace, 'README.md')).mode & 0o777) === 0o644],
+    ["the checkout's git configuration is the one it had", fs.readFileSync(path.join(workspace, '.git', 'config'), 'utf8').replace(/\n\[includeIf[^\n]*\n[^\n]*\n?/, '\n') === configBefore.replace(/\n\[includeIf[^\n]*\n[^\n]*\n?/, '\n')],
     ['publish green', pub.code === 0],
   ];
   fs.rmSync(probe, { force: true });

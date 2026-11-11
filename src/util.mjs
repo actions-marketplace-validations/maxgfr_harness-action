@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 // Small shared helpers.
 export function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -43,6 +44,15 @@ export function toToml(obj, { inline = [] } = {}) {
   };
   emit(obj, []);
   return lines.join('\n').trim() + '\n';
+}
+
+/**
+ * The content of `file` if it is a regular file, else null. What the agent leaves in the state
+ * directory is read this way: a symbolic link there must not make the job's user read, and then
+ * publish, whatever it points to.
+ */
+export function readRegular(file) {
+  try { return fs.lstatSync(file).isFile() ? fs.readFileSync(file, 'utf8') : null; } catch { return null; }
 }
 
 export function truncate(s, n) {

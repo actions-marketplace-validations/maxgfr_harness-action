@@ -87,14 +87,22 @@ async function main() {
       await run({ env, stateDir });
       return 0;
     }
-    const { asAgent, killAgent } = await import('./sandbox.mjs');
+    const { asAgent, reclaim, safePath } = await import('./sandbox.mjs');
     const { sanitizedEnv } = await import('./util.mjs');
-    const [bin, args] = asAgent(plan.sandbox, [process.execPath, fileURLToPath(import.meta.url), 'run-as-agent'], { home: plan.home, env: sanitizedEnv(env, { HARNESS_STATE_DIR: stateDir }), envFile: path.join(stateDir, 'agent-env.json') });
-    core.info(`Running the agent as the user ${plan.sandbox.user}.`);
-    const r = spawnSync(bin, args, { stdio: 'inherit', env: { PATH: env.PATH ?? '' } });
-    if (r.status !== 0) core.warning(`The run as ${plan.sandbox.user} ended with ${r.error?.message ?? `exit code ${r.status ?? r.signal}`}.`);
-    killAgent(plan.sandbox); // nothing it started outlives this step
-    fs.rmSync(path.join(stateDir, 'agent-env.json'), { force: true }); // (if the run never got to read it)
+    const envFile = path.join(stateDir, 'agent-env.json');
+    try {
+      const [bin, args] = asAgent(plan.sandbox, [process.execPath, fileURLToPath(import.meta.url), 'run-as-agent'], { home: plan.home, env: sanitizedEnv(env, { HARNESS_STATE_DIR: stateDir }), envFile });
+      core.info(`Running the agent as the user ${plan.sandbox.user}.`);
+      const r = spawnSync(bin, args, { stdio: 'inherit', env: { PATH: env.PATH ?? '' } });
+      if (r.status !== 0) core.warning(`The run as ${plan.sandbox.user} ended with ${r.error?.message ?? `exit code ${r.status ?? r.signal}`}.`);
+    } finally {
+      // Nothing it started outlives this step, and its files are the runner's again even if
+      // Publish never runs (a cancelled job). (From here on, no program the agent could have
+      // planted in the working tree is looked up through PATH.)
+      process.env.PATH = safePath(process.env.PATH, plan.sandbox.writable);
+      fs.rmSync(envFile, { force: true });
+      reclaim(plan.sandbox, { log: core.info });
+    }
     return 0;
   }
   if (cmd === 'run-as-agent') {

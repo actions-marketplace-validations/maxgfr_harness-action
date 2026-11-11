@@ -12,8 +12,8 @@ import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../har
 import { resolveEndpoint } from '../harness/providers.mjs';
 import { installSkills, repositorySkillNames } from '../skills.mjs';
 import { buildPrompt, buildFollowupPrompt } from '../prompt.mjs';
-import { git, isRepo, headSha, stripCredentials, repoRoot } from '../git.mjs';
-import { sandboxDecision, setupSandbox } from '../sandbox.mjs';
+import { git, isRepo, headSha, stripCredentials, restoreCredentials, repoRoot, privateGitDir, snapshotGit } from '../git.mjs';
+import { sandboxDecision, setupSandbox, isInside } from '../sandbox.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ACTION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -158,8 +158,15 @@ async function ciStatus(github, ctx, sha) {
 }
 
 /** Throws on what the inputs alone show cannot work. */
-export function validateRun({ adapter, model, endpoint, inputs, workDir }) {
+export function validateRun({ adapter, model, endpoint }) {
   adapter.validate?.({ model, endpoint });
+}
+
+/**
+ * The skill to use must exist before anything is installed. Called once the branch the agent
+ * works on is checked out: a pull request may be the one that adds the skill.
+ */
+export function checkSkillAvailable({ inputs, workDir }) {
   if (inputs.skill && !inputs.skills.length && !repositorySkillNames(workDir).includes(inputs.skill)) {
     throw new Error(`Input skill "${inputs.skill}" is not installed: no \`skills\` source is given and the repository has no skill of that name (in ${['.agents', '.claude', '.opencode', '.codex', '.pi', '.openclaw'].map((d) => `${d}/skills`).join(', ')})`);
   }
@@ -212,7 +219,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const isPR = ctx.isPR;
   // Mistakes in the inputs are reported now, before a tracking comment is posted and the harness
   // is installed: only what depends on a clone (a skill from `skills`) is left for later.
-  validateRun({ adapter, model, endpoint, inputs, workDir });
+  validateRun({ adapter, model, endpoint });
 
   const own = ownComments(github);
   const listComments = commentLister(github, ctx);
@@ -244,6 +251,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
     }
   }
 
+  let removedCredentials = null;
+  let credentialsRoot = workDir;
   try {
     // --- pull request data + checkout of the right branch --------------------------------------
     let pr = null;
@@ -338,6 +347,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       git(['checkout', '-B', inputs.baseBranch, `origin/${inputs.baseBranch}`], workDir);
     }
 
+    checkSkillAvailable({ inputs, workDir });
     const ci = await ciStatus(github, ctx, pr?.headSha ?? ctx.sha);
     if (ci) save('ci.json', ci);
 
@@ -397,20 +407,37 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
 
 
     // --- remove persisted git credentials for the agent run --------------------------------------
-    const removedCredentials = repoOk ? stripCredentials(workDir) : null;
+    // The root of the checkout, decided now, while its git configuration is the one the job
+    // started with: Publish uses this one, never what the agent's `.git` would say then.
+    const root = repoOk ? repoRoot(workDir) : workDir;
+    removedCredentials = repoOk ? stripCredentials(workDir) : null;
+    credentialsRoot = workDir;
+    // Publish compares the working tree through a git directory of its own (the checkout's
+    // `.git` is the agent's to write).
+    const gitDir = repoOk ? privateGitDir(root, path.join(stateDir, 'git')) : null;
 
     // --- the agent's own user -------------------------------------------------------------------
     let sandbox = null;
     if (isolation.enabled) {
-      sandbox = await core.group('Agent user', () => setupSandbox({
-        // what the agent changes, and where the Run step writes
-        writable: [repoOk ? repoRoot(workDir) : workDir, home, ...['codex-home', 'pi-agent', 'pi-sessions'].map((d) => path.join(stateDir, d)).filter((d) => fs.existsSync(d)), ...(thread0 ? [sessionDir] : [])],
-        // it adds its results next to the files Prepare wrote, which it cannot replace
-        sticky: [stateDir, reportDir],
-        readable: [path.dirname(bin).replace(/\/node_modules\/\.bin$/, ''), ACTION_ROOT, process.execPath],
-        log: core.info,
-      }));
-      core.info(`The agent runs as ${sandbox.user} (${isolation.reason}).`);
+      const writable = [root, home, ...['codex-home', 'pi-agent', 'pi-sessions'].map((d) => path.join(stateDir, d)).filter((d) => fs.existsSync(d)), ...(thread0 ? [sessionDir] : [])];
+      if (isInside(ACTION_ROOT, root)) core.warning(`The action itself is in the working tree (${ACTION_ROOT}, e.g. \`uses: ./\`): the agent can change the code that Publish runs. Use a published version (owner/harness-action@v2) for the isolation to cover it.`);
+      try {
+        sandbox = await core.group('Agent user', () => setupSandbox({
+          // what the agent changes, and where the Run step writes
+          writable,
+          // it adds its results next to the files Prepare wrote, which it cannot replace
+          sticky: [stateDir, reportDir],
+          readable: [path.dirname(bin).replace(/\/node_modules\/\.bin$/, ''), ACTION_ROOT, process.execPath],
+          home,
+          privateDir: path.join(stateDir, 'private'),
+          gitSnapshot: repoOk ? snapshotGit(root, path.join(stateDir, 'private', 'git-snapshot')) : null,
+          log: core.info,
+        }));
+        core.info(`The agent runs as ${sandbox.user} (${isolation.reason}).`);
+      } catch (err) {
+        if (inputs.sandbox === 'on') throw new Error(`sandbox: on, but the agent's user could not be set up: ${err.message}`);
+        core.warning(`The agent's own user could not be set up (${err.message}): it runs as the job's user. See docs/security.md.`);
+      }
     } else {
       core.info(`The agent runs as the job's user (${isolation.reason}).`);
     }
@@ -448,6 +475,8 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
       baseHead: repoOk ? headSha(workDir) : '',
       branchName: repoOk ? (git(['rev-parse', '--abbrev-ref', 'HEAD'], workDir).trim()) : '',
       removedCredentials,
+      repoRoot: root,
+      gitDir,
       skills: skills.map((s) => ({ name: s.name, source: s.source })),
       adapterId,
       loop,
@@ -469,6 +498,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
         body: `${TRACKING_MARKER}\n${sticky ?? ''}\n❌ **${inputs.harness}** could not start · [View job run](${ctx.runUrl})\n\n> ${truncate(err.message, 1000)}`,
       }).catch(() => {});
     }
+    // Credentials removed for a run that will not happen come back now: Publish has no context
+    // to restore them from.
+    if (removedCredentials) restoreCredentials(credentialsRoot, removedCredentials, inputs.githubToken, ctx.serverUrl);
     throw err;
   }
 }

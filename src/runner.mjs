@@ -23,13 +23,17 @@ function lineSplitter(onLine) {
   };
 }
 
-function describe(ev) {
+const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+export function describe(ev) {
   switch (ev.t) {
     case 'text': return `💬 ${truncate(ev.text.replace(/\s+/g, ' '), 300)}`;
-    case 'tool': return `🔧 ${ev.name} ${truncate(JSON.stringify(ev.input ?? {}), 200)}`;
-    case 'tool_result': return ev.error ? `   ✗ ${ev.name}: ${truncate(ev.error, 200)}` : null;
-    case 'error': return `❌ ${ev.message}`;
-    case 'warning': return `⚠️  ${ev.message}`;
+    case 'tool': return `🔧 ${oneLine(ev.name)} ${truncate(JSON.stringify(ev.input ?? {}), 200)}`;
+    // (one line each: a newline in text the agent or a tool chose could start a line `::…`,
+    // which the runner would read as a workflow command)
+    case 'tool_result': return ev.error ? `   ✗ ${ev.name}: ${truncate(oneLine(ev.error), 200)}` : null;
+    case 'error': return `❌ ${oneLine(ev.message)}`;
+    case 'warning': return `⚠️  ${oneLine(ev.message)}`;
     default: return null;
   }
 }

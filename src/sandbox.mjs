@@ -5,37 +5,40 @@
 // could still reach the token-holding steps: rewrite the action's files or the state they read,
 // read their environment through /proc, or leave a process behind that waits for Publish to
 // restore the checkout credentials. So when the agent can run code, the whole Run step runs as
-// a dedicated system user, `harness-agent`:
+// a system user created for this run only (`ha-agent-<random>`):
 //
-//   - it can write only the working tree, its own home and the directories Run writes to;
-//   - the files Prepare wrote (plan, context, prompts) are the runner's, in a sticky directory:
-//     the agent can read them, never replace them;
-//   - every one of its processes is killed before Publish restores credentials, and Publish
-//     takes the files back (owner, no symbolic link) before it uses them.
+//   - it can write the working tree, its own home and the directories Run writes to, nothing
+//     else of the runner's; the files Prepare wrote are the runner's, in sticky directories,
+//     so it can read them but never replace them;
+//   - when Run ends, every one of its processes is killed (Run's own wrapper, then Publish
+//     again), its cron jobs are removed, everything it wrote becomes the runner's again, the
+//     modes of the working tree are put back, the checkout's git configuration and hooks are
+//     restored, and symbolic links are removed from the directories Publish reads or uploads;
+//   - Publish deletes the user.
 //
 // It needs Linux and passwordless sudo, which GitHub-hosted runners have.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-
-export const AGENT_USER = 'harness-agent';
+import { restoreGit } from './git.mjs';
 
 const sudo = (args, opts = {}) => execFileSync('sudo', ['-n', ...args], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
-const trySudo = (args) => { try { sudo(args); return true; } catch { return false; } };
+const trySudo = (args, opts) => { try { sudo(args, opts); return true; } catch { return false; } };
 
 /** Can this runner give the agent its own user? */
 export function sandboxSupport() {
   if (process.platform !== 'linux') return { ok: false, reason: `${process.platform} runner` };
   if (typeof process.getuid === 'function' && process.getuid() === 0) return { ok: false, reason: 'the job already runs as root' };
   if (!trySudo(['true'])) return { ok: false, reason: 'no passwordless sudo' };
-  if (!trySudo(['sh', '-c', 'command -v useradd && command -v pkill'])) return { ok: false, reason: 'useradd / pkill not available' };
+  if (!trySudo(['sh', '-c', 'command -v useradd && command -v userdel && command -v pgrep && command -v find'])) return { ok: false, reason: 'useradd / userdel / pgrep / find not available' };
   return { ok: true, reason: '' };
 }
 
 /**
  * Whether this run gets its own user: `on` always (and fails if the runner cannot), `off`
  * never, `auto` when the agent can execute code and the runner supports it.
- * @returns {{ enabled: boolean, reason: string }}
+ * @returns {{ enabled: boolean, reason: string, warn?: boolean }}
  */
 export function sandboxDecision({ mode, perms, loopUntil, support = sandboxSupport }) {
   if (mode === 'off') return { enabled: false, reason: 'sandbox: off' };
@@ -47,45 +50,60 @@ export function sandboxDecision({ mode, perms, loopUntil, support = sandboxSuppo
   return { enabled: false, reason: `this runner cannot (${s.reason})`, warn: true };
 }
 
-/** Every directory from `/` down to `p` (included when it is one). */
+/** Every directory from `/` down to `p` (included). */
 function ancestors(p) {
   const out = [];
   for (let d = path.resolve(p); ; d = path.dirname(d)) { out.unshift(d); if (d === path.dirname(d)) break; }
   return out;
 }
 
+export const isInside = (p, dir) => { const r = path.relative(dir, p); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
+
+/** `PATH` without the directories the agent could write to: a program it planted there must not be what the job's user runs. */
+export function safePath(pathValue, writable) {
+  return String(pathValue ?? '').split(path.delimiter).filter((d) => d && !writable.some((w) => isInside(path.resolve(d), w))).join(path.delimiter);
+}
+
 /**
- * Creates the user (once per machine) and gives it what it needs.
+ * Creates the user and gives it what it needs. Any failure undoes what was done and throws.
  * @param {object} p
- * @param {string[]} p.writable    directories the agent writes to (recursively)
- * @param {string[]} p.sticky      directories it may add files to, but where it cannot replace the runner's
- * @param {string[]} p.readable    files / directories it must be able to read (recursively)
- * @returns {{ user: string, uid: number, gid: number, owner: string }}
+ * @param {string[]} p.writable  directories the agent writes to (recursively)
+ * @param {string[]} p.sticky    directories it may add files to, where it cannot replace the runner's
+ * @param {string[]} p.readable  files / directories it must be able to read (recursively)
+ * @param {string}   p.home      its home directory (one of `writable`)
+ * @param {string}   p.privateDir a directory of the runner's only, for what is needed to undo all this
+ * @param {string|null} p.gitSnapshot the manifest written by `snapshotGit`, if there is a checkout
  */
-export function setupSandbox({ writable, sticky, readable, log = () => {} }) {
-  // A real shell: harnesses run their shell tool with the user's login shell. The account has no
-  // password, so nobody can log in with it.
+export function setupSandbox({ writable, sticky, readable, home, privateDir, gitSnapshot = null, log = () => {} }) {
+  const user = `ha-agent-${crypto.randomBytes(4).toString('hex')}`;
+  // A real shell (harnesses run their shell tool with the user's login shell) and a real home;
+  // the account has no password, nobody can log in with it.
   const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
-  if (spawnSync('id', ['-u', AGENT_USER]).status !== 0) {
-    sudo(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent', '--shell', shell, AGENT_USER]);
-    log(`Created the system user ${AGENT_USER} for the agent.`);
-  } else {
-    trySudo(['usermod', '--shell', shell, AGENT_USER]);
+  sudo(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', home, '--shell', shell, user]);
+  for (const d of writable) fs.mkdirSync(d, { recursive: true });
+  const sandbox = { user, owner: `${process.getuid()}:${process.getgid()}`, home, shell, writable, sticky, modes: path.join(privateDir, 'modes'), gitSnapshot };
+  try {
+    if (!trySudo(['-u', user, 'true'])) throw new Error(`sudo cannot run commands as ${user}`);
+    fs.mkdirSync(privateDir, { recursive: true, mode: 0o700 });
+    // the modes the working tree had, to put them back afterwards (octal, NUL-separated)
+    const listed = writable.map((d) => execFileSync('find', [d, '!', '-type', 'l', '-printf', '%m %p\\0'], { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'ignore'] }));
+    fs.writeFileSync(sandbox.modes, listed.join(''), { mode: 0o600 });
+    // the way in: every directory above what it uses must be traversable (o+x)
+    const traverse = new Set();
+    for (const p of [...writable, ...sticky, ...readable]) {
+      for (const d of ancestors(fs.existsSync(p) && !fs.statSync(p).isDirectory() ? path.dirname(p) : p)) traverse.add(d);
+    }
+    const closed = [...traverse].filter((d) => { try { return !(fs.statSync(d).mode & 0o001); } catch { return false; } });
+    if (closed.length) sudo(['chmod', 'o+x', ...closed]);
+    for (const p of readable) if (fs.existsSync(p)) sudo(['chmod', '-R', 'o+rX', p]);
+    for (const d of sticky) { fs.mkdirSync(d, { recursive: true }); sudo(['chmod', '1777', d]); }
+    for (const d of writable) sudo(['chmod', '-R', 'a+rwX', d]);
+    log(`Created the system user ${user} for the agent.`);
+    return sandbox;
+  } catch (err) {
+    reclaim(sandbox, { removeUser: true });
+    throw err;
   }
-  const uid = Number(execFileSync('id', ['-u', AGENT_USER], { encoding: 'utf8' }).trim());
-  const gid = Number(execFileSync('id', ['-g', AGENT_USER], { encoding: 'utf8' }).trim());
-  const owner = `${process.getuid()}:${process.getgid()}`;
-  // the way in: every directory above what it uses must be traversable (o+x)
-  const traverse = new Set();
-  for (const p of [...writable, ...sticky, ...readable]) {
-    for (const d of ancestors(fs.existsSync(p) && !fs.statSync(p).isDirectory() ? path.dirname(p) : p)) traverse.add(d);
-  }
-  const closed = [...traverse].filter((d) => { try { return !(fs.statSync(d).mode & 0o001); } catch { return false; } });
-  if (closed.length) sudo(['chmod', 'o+x', ...closed]);
-  for (const p of readable) if (fs.existsSync(p)) sudo(['chmod', '-R', 'o+rX', p]);
-  for (const d of sticky) { fs.mkdirSync(d, { recursive: true }); sudo(['chmod', '1777', d]); }
-  for (const d of writable) { fs.mkdirSync(d, { recursive: true }); sudo(['chmod', '-R', 'a+rwX', d]); }
-  return { user: AGENT_USER, uid, gid, owner };
 }
 
 /**
@@ -95,10 +113,9 @@ export function setupSandbox({ writable, sticky, readable, log = () => {} }) {
  * refuse. The process it starts reads the file, removes it, and takes the variables (`takeEnv`).
  */
 export function asAgent(sandbox, argv, { home, env, envFile }) {
-  const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
   fs.writeFileSync(envFile, JSON.stringify(env), { mode: 0o600 });
   sudo(['chown', sandbox.user, envFile]);
-  return ['sudo', ['-n', '-u', sandbox.user, '--', 'env', `PATH=${env.PATH ?? process.env.PATH ?? ''}`, `HOME=${home}`, `SHELL=${shell}`, `USER=${sandbox.user}`, `LOGNAME=${sandbox.user}`, `HARNESS_ENV_FILE=${envFile}`, ...argv]];
+  return ['sudo', ['-n', '-u', sandbox.user, '--', 'env', `PATH=${env.PATH ?? ''}`, `HOME=${home}`, `SHELL=${sandbox.shell}`, `USER=${sandbox.user}`, `LOGNAME=${sandbox.user}`, `HARNESS_ENV_FILE=${envFile}`, ...argv]];
 }
 
 /** In the process `asAgent` started: the environment it was given, once (the file goes). */
@@ -113,17 +130,24 @@ export function takeEnv(target = process.env) {
   for (const [k, v] of Object.entries(env)) if (!own.includes(k) || target[k] === undefined) target[k] = v;
 }
 
-/** Ends every process of the agent's user: nothing it started outlives the Run step. */
+const alive = (user) => spawnSync('pgrep', ['-u', user]).status === 0;
+
+/**
+ * Ends every process of the agent's user, and its cron jobs. `kill -1` sent as that user reaches
+ * all of its processes at once, so a process that keeps forking cannot slip between a listing and
+ * a kill. Returns false if some process is still there.
+ */
 export function killAgent(sandbox) {
-  if (!sandbox?.user) return;
-  for (const signal of ['TERM', 'KILL']) {
-    trySudo(['pkill', `-${signal}`, '-u', sandbox.user]);
-    if (spawnSync('pgrep', ['-u', sandbox.user]).status !== 0) return;
-    spawnSync('sleep', ['1']);
+  if (!sandbox?.user) return true;
+  trySudo(['crontab', '-r', '-u', sandbox.user]);
+  for (let i = 0; i < 10 && alive(sandbox.user); i++) {
+    trySudo(['-u', sandbox.user, 'kill', '-KILL', '-1']);
+    if (alive(sandbox.user)) spawnSync('sleep', ['0.5']);
   }
+  return !alive(sandbox.user);
 }
 
-/** Removes every symbolic link under `dir`: an upload of it must not reach files outside it. */
+/** Removes every symbolic link under `dir`: what is read or uploaded from it stays inside it. */
 export function dropLinks(dir) {
   const removed = [];
   const walk = (d) => {
@@ -138,17 +162,41 @@ export function dropLinks(dir) {
   return removed;
 }
 
+/** Puts back the modes `setupSandbox` recorded (a path that is gone is skipped). */
+function restoreModes(file) {
+  let listed = '';
+  try { listed = fs.readFileSync(file, 'utf8'); } catch { return; }
+  const byMode = new Map();
+  for (const entry of listed.split('\0')) {
+    const space = entry.indexOf(' ');
+    if (space < 0) continue;
+    const mode = entry.slice(0, space);
+    if (!byMode.has(mode)) byMode.set(mode, []);
+    byMode.get(mode).push(entry.slice(space + 1));
+  }
+  for (const [mode, paths] of byMode) trySudo(['xargs', '-0', '-r', 'chmod', '-f', mode], { input: paths.join('\0'), stdio: ['pipe', 'ignore', 'ignore'] });
+}
+
 /**
- * Publish takes the files back: the agent's processes are gone, everything it wrote is the
- * runner's again, and the directories that are uploaded hold no symbolic link.
+ * Takes the files back. Safe to call more than once (Run's wrapper, then Publish). The order
+ * matters: no process of the agent is left when its files change hands, and the links are gone
+ * before any mode is set.
+ * @returns {{ clean: boolean, undone: string[] }} clean: no process of the agent is left
  */
-export function reclaim(sandbox, { dirs, uploads, log = () => {} }) {
-  if (!sandbox?.user) return;
-  killAgent(sandbox);
-  const present = dirs.filter((d) => d && fs.existsSync(d));
-  if (present.length) sudo(['chown', '-R', '--no-dereference', sandbox.owner, ...present]);
-  for (const d of uploads) {
+export function reclaim(sandbox, { uploads = [], removeUser = false, log = () => {} } = {}) {
+  if (!sandbox?.user) return { clean: true, undone: [] };
+  const clean = killAgent(sandbox);
+  if (!clean) log(`Some processes of ${sandbox.user} could not be stopped.`);
+  const dirs = [...sandbox.writable, ...sandbox.sticky].filter((d) => fs.existsSync(d));
+  if (dirs.length) trySudo(['chown', '-R', '--no-dereference', '--preserve-root', sandbox.owner, ...dirs]);
+  for (const d of [...new Set([...sandbox.sticky, ...uploads])]) {
     const removed = d ? dropLinks(d) : [];
     if (removed.length) log(`Removed ${removed.length} symbolic link(s) the agent left in ${d}.`);
   }
+  for (const d of sandbox.sticky) if (fs.existsSync(d)) fs.chmodSync(d, 0o755);
+  restoreModes(sandbox.modes);
+  const undone = sandbox.gitSnapshot && fs.existsSync(sandbox.gitSnapshot) ? restoreGit(sandbox.gitSnapshot) : [];
+  if (undone.length) log(`Undid what the agent changed in the checkout's git directory: ${undone.join(', ')}.`);
+  if (removeUser && clean) trySudo(['userdel', sandbox.user]);
+  return { clean, undone };
 }

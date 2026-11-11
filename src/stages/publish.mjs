@@ -8,16 +8,16 @@ import { createClient } from '../github/api.mjs';
 import { collect, failsGate, validate } from '../contract.mjs';
 import { treeChanges, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
-import { truncate } from '../util.mjs';
-import { reclaim } from '../sandbox.mjs';
+import { truncate, readRegular } from '../util.mjs';
+import { reclaim, safePath } from '../sandbox.mjs';
 
-const readJson = (f, d = null) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
+const readJson = (f, d = null) => { try { return JSON.parse(readRegular(f)); } catch { return d; } };
 
 /** The normalised events of the run. A line cut short (a cancelled run) is skipped, not fatal. */
 export function readEvents(file) {
   if (!fs.existsSync(file)) return [];
   const events = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+  for (const line of (readRegular(file) ?? '').split('\n')) {
     if (!line) continue;
     try { events.push(JSON.parse(line)); } catch {}
   }
@@ -36,12 +36,15 @@ export function branchNameFor({ template, prefix, ctx, now = new Date() }) {
 
 export async function commitChanges({ github, inputs, context, workDir, reportDir }) {
   const { ctx, commitMode, pr } = context;
-  if (!isRepo(workDir)) return { branch: null };
+  // The root and the git directory Prepare recorded, not what the checkout's `.git` says now:
+  // the agent may have rewritten it (`core.worktree`, a partial-clone remote, hooks…).
+  // (Without them, a context written by an older version: ask the checkout.)
+  if (!context.gitDir && !isRepo(workDir)) return { branch: null };
   // The whole repository, from its root: `working_directory` may be a sub-directory of it.
-  const root = repoRoot(workDir);
+  const root = context.repoRoot ?? repoRoot(workDir);
   // Compared with the commit the run started from: an agent that committed locally (it is told
   // not to) still gets its work published.
-  const changes = treeChanges(root, context.baseHead || 'HEAD');
+  const changes = treeChanges(root, context.baseHead || 'HEAD', { gitDir: context.gitDir ?? null });
   if (!changes.any) return { branch: null };
   fs.writeFileSync(path.join(reportDir, 'changes.patch'), changes.patch);
   core.info(`Working tree: ${changes.additions.length} file(s) added/modified, ${changes.deletions.length} deleted.`);
@@ -191,12 +194,12 @@ export async function publish({ env = process.env, stateDir }) {
   const reportDir = path.join(stateDir, 'report');
   // The agent ran as its own user: its processes end now, before anything here reads what it
   // left or the credentials come back, and its files become the runner's again.
+  let agentGone = true;
   if (context.sandbox) {
-    reclaim(context.sandbox, {
-      dirs: [isRepo(workDir) ? repoRoot(workDir) : workDir, stateDir, context.session?.dir],
-      uploads: [reportDir, context.session?.dir],
-      log: core.info,
-    });
+    // (no program the agent could have planted in the working tree is looked up through PATH)
+    process.env.PATH = safePath(process.env.PATH, context.sandbox.writable);
+    ({ clean: agentGone } = reclaim(context.sandbox, { uploads: [reportDir, context.session?.dir], removeUser: true, log: core.info }));
+    if (!agentGone) core.warning(`Some processes of ${context.sandbox.user} survived: the checkout credentials are not restored.`);
   }
   fs.mkdirSync(reportDir, { recursive: true });
   const github = createClient({ token: inputs.githubToken });
@@ -212,7 +215,7 @@ export async function publish({ env = process.env, stateDir }) {
   } catch (err) {
     commitError = err;
   } finally {
-    if (context.removedCredentials) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
+    if (context.removedCredentials && agentGone) restoreCredentials(workDir, context.removedCredentials, inputs.githubToken, ctx.serverUrl);
   }
 
   const status = run?.status ?? 'error';

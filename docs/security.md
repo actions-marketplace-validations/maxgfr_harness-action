@@ -26,15 +26,16 @@ On top of that:
 
 Scrubbing the environment keeps the token out of the agent's reach only if the agent cannot reach the steps that hold it. Without more, the three steps run as the same user, so code the agent runs (a shell command, or the `loop_until` check, which executes what the agent wrote) could rewrite the action's files or the state Publish reads, read the environment of the token-holding steps through `/proc`, or leave a process behind that waits for Publish to restore the credentials.
 
-So with `sandbox: auto` (the default), whenever the agent can run code (`tools: full`, an `allow_bash` list, or `loop_until`) and the runner allows it, the whole Run step (harness, MCP server, completion check) runs as a dedicated system user, `harness-agent`:
+So with `sandbox: auto` (the default), whenever the agent can run code (`tools: full`, an `allow_bash` list, or `loop_until`) and the runner allows it, the whole Run step (harness, MCP server, completion check) runs as a system user created for this run only (`ha-agent-<random>`), deleted by Publish:
 
 - it can write the working tree, its own home and the directories the Run step writes to, nothing else of the runner's;
 - the files Prepare wrote (`plan.json`, `context.json`, the prompts) are the runner's, in a sticky directory: the agent can read them but not replace them;
 - it cannot read the environment of the runner's processes, nor write the action's files;
-- every one of its processes is killed at the end of the Run step, and again before Publish restores credentials;
-- Publish takes its files back (owner, no symbolic link in the directories it uploads) before it uses them.
+- every one of its processes is killed at the end of the Run step, and again before Publish restores credentials (which it does not do if one survives), and its cron jobs are removed;
+- its files become the runner's again, the modes of the working tree are put back, symbolic links are removed from the directories Publish reads or uploads, and the checkout's git configuration and hooks are restored as they were before the run;
+- Publish compares the working tree through a git directory of its own and uses the checkout root recorded by Prepare: nothing the agent writes into `.git` is read by a step that holds the token, nor by a later use of the action in the same job.
 
-This needs Linux and passwordless `sudo`, which GitHub-hosted runners have; the action creates the user, makes the directories above the workspace traversable (`o+x`), and makes the workspace writable for it. On a runner that cannot (macOS, Windows, a container already running as root, no `sudo`), `auto` warns and runs the agent as the job's user; `sandbox: on` fails instead, and `sandbox: off` never isolates. As the agent's user, a command cannot use what belongs to the job's user: the Docker socket, `sudo`, files under `$HOME` that are not world-readable.
+This needs Linux and passwordless `sudo`, which GitHub-hosted runners have; the action creates the user, makes the directories above the workspace traversable (`o+x`), and makes the workspace writable for it. On a runner that cannot (macOS, Windows, a container already running as root, no `sudo`), `auto` warns and runs the agent as the job's user; `sandbox: on` fails instead, and `sandbox: off` never isolates. As the agent's user, a command cannot use what belongs to the job's user: the Docker socket, `sudo`, and anything it would write under the job's `$HOME`. Its `HOME` is its own (in the action's state directory), so tools that keep their caches or toolchains in the runner's home (`~/.cargo`, `~/.m2`, `pip --user`) cannot write there: fetch dependencies before the action (`cargo fetch`, `mvn dependency:go-offline`, `npm ci`), point those tools at a directory in the workspace, or set `sandbox: off` if the agent's commands need the job's user.
 
 When the action is used from the workspace itself (`uses: ./`), its files are part of the working tree the agent may write: use a published version (`owner/harness-action@v2`) for the isolation to cover them.
 
