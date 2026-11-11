@@ -15,7 +15,7 @@ import { readInputs } from '../../src/inputs.mjs';
 import { toolList } from '../../src/harness/pi.mjs';
 import { buildConfig as openclawConfig } from '../../src/harness/openclaw.mjs';
 import { resolveEndpoint } from '../../src/harness/providers.mjs';
-import { redactMcpSecrets } from '../../src/stages/prepare.mjs';
+import { redactMcpSecrets, validateRun } from '../../src/stages/prepare.mjs';
 import { toToml } from '../../src/util.mjs';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'events');
@@ -117,6 +117,28 @@ test('codex: TOML harness_config keeps its top-level keys at the top level', () 
   const read = (over) => readInputs({ INPUT_MODEL: 'a/b', INPUT_HARNESS_CONFIG: over }).harnessConfig;
   assert.equal(read(file), user);
   assert.equal(read('a = "b.toml"'), 'a = "b.toml"'); // inline TOML is kept as it is
+});
+
+test('mistakes the inputs alone show are reported before anything is posted or installed', () => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-validate-'));
+  const v = (harness, over = {}) => {
+    const i = readInputs(Object.fromEntries(Object.entries({ model: 'anthropic/m', harness, ...over }).map(([k, x]) => [`INPUT_${k.toUpperCase()}`, x])));
+    const model = { provider: i.model.split('/')[0], id: i.model.split('/').slice(1).join('/') };
+    if (!i.model.includes('/')) Object.assign(model, { provider: '', id: i.model });
+    return () => validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }), inputs: i, workDir: work });
+  };
+  assert.throws(v('codex'), /only speaks OpenAI-compatible/);
+  assert.throws(v('codex', { model: 'acme/m' }), /does not know provider "acme"/);
+  v('codex', { model: 'openrouter/anthropic/m' })();
+  assert.throws(v('opencode', { model: 'bare-model' }), /needs `model` as provider\/model/);
+  assert.throws(v('openclaw', { model: 'bare-model' }), /needs `model` as provider\/model/);
+  v('pi', { model: 'bare-model' })(); // pi has a default provider
+  // a skill to use that nothing provides
+  assert.throws(v('pi', { skill: 'lint' }), /skill "lint" is not installed/);
+  fs.mkdirSync(path.join(work, '.claude', 'skills', 'lint'), { recursive: true });
+  fs.writeFileSync(path.join(work, '.claude', 'skills', 'lint', 'SKILL.md'), '---\nname: lint\n---\n');
+  v('pi', { skill: 'lint' })();
+  v('pi', { skill: 'remote-one', skills: 'acme/skills' })(); // known only after the clone
 });
 
 test('pi tool list keeps MCP tools', () => {

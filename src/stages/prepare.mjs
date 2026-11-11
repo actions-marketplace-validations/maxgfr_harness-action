@@ -10,7 +10,7 @@ import { createClient } from '../github/api.mjs';
 import { detectMode, checkAccess, wantsTrackingComment, keepCommentAuthor, intentFor } from '../modes.mjs';
 import { resolveHarness, permissionProfile, MCP_SERVER, splitArgs } from '../harness/index.mjs';
 import { resolveEndpoint } from '../harness/providers.mjs';
-import { installSkills } from '../skills.mjs';
+import { installSkills, repositorySkillNames } from '../skills.mjs';
 import { buildPrompt, buildFollowupPrompt } from '../prompt.mjs';
 import { git, isRepo, headSha, stripCredentials } from '../git.mjs';
 import { TRACKING_MARKER, stickyMarker, workingBody } from '../publish/render.mjs';
@@ -153,6 +153,14 @@ async function ciStatus(github, ctx, sha) {
   }
 }
 
+/** Throws on what the inputs alone show cannot work. */
+export function validateRun({ adapter, model, endpoint, inputs, workDir }) {
+  adapter.validate?.({ model, endpoint });
+  if (inputs.skill && !inputs.skills.length && !repositorySkillNames(workDir).includes(inputs.skill)) {
+    throw new Error(`Input skill "${inputs.skill}" is not installed: no \`skills\` source is given and the repository has no skill of that name (in ${['.agents', '.claude', '.opencode', '.codex', '.pi', '.openclaw'].map((d) => `${d}/skills`).join(', ')})`);
+  }
+}
+
 export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const inputs = readInputs(env);
   const ctx = readContext(env);
@@ -195,6 +203,9 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const model = { ...splitModel(inputs.model), raw: inputs.model };
   const endpoint = resolveEndpoint({ provider: model.provider, baseUrl: inputs.baseUrl, apiKeyEnv: inputs.apiKeyEnv });
   const isPR = ctx.isPR;
+  // Mistakes in the inputs are reported now, before a tracking comment is posted and the harness
+  // is installed: only what depends on a clone (a skill from `skills`) is left for later.
+  validateRun({ adapter, model, endpoint, inputs, workDir });
 
   const own = ownComments(github);
   const listComments = commentLister(github, ctx);

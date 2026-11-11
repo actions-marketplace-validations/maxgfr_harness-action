@@ -89,6 +89,11 @@ export function discoverSkills(root, { maxDepth = 6 } = {}) {
   return found;
 }
 
+/** Names of the skills committed in the repository (no clone, nothing written). */
+export function repositorySkillNames(workDir) {
+  return REPO_SKILL_DIRS.flatMap((rel) => (fs.existsSync(path.join(workDir, rel)) ? discoverSkills(path.join(workDir, rel), { maxDepth: 2 }).map((s) => s.name) : []));
+}
+
 function git(args, opts = {}) {
   return execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
 }

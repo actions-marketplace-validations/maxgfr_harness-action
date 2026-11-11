@@ -67,12 +67,15 @@ export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig,
 
 export default {
   id: 'openclaw',
+  validate({ model, endpoint }) {
+    if (!model.provider && !endpoint.custom) throw new Error('openclaw needs `model` as provider/model, e.g. anthropic/claude-sonnet-5-5');
+  },
   streaming: false,
   resumable: true,
   install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare({ home, workDir, model, endpoint, perms, mcpServers, harnessConfig, warn }) {
-    if (!model.provider && !endpoint.custom) throw new Error('openclaw needs `model` as provider/model, e.g. anthropic/claude-sonnet-5-5');
+    this.validate({ model, endpoint });
     const dir = path.join(home, '.openclaw');
     fs.mkdirSync(dir, { recursive: true });
     const config = buildConfig({ model, endpoint, perms, mcpServers, harnessConfig, workDir, skillsDir: path.join(home, '.agents', 'skills') });
