@@ -35,7 +35,10 @@ export function buildConfig({ model, endpoint, perms, mcpServers, harnessConfig,
   }
   const providerId = endpoint.custom ? endpoint.provider : model.provider;
   const config = {
-    agents: { defaults: { model: `${providerId}/${model.id}`, workspace: workDir } },
+    // `skipBootstrap`: the workspace is the repository checkout. Without it OpenClaw seeds the
+    // workspace with its assistant files (AGENTS.md, SOUL.md, IDENTITY.md, USER.md), which then
+    // look like changes made by the agent and get committed.
+    agents: { defaults: { model: `${providerId}/${model.id}`, workspace: workDir, skipBootstrap: true } },
     mcp: { servers },
     skills: { load: { extraDirs: [skillsDir] } },
     tools: {

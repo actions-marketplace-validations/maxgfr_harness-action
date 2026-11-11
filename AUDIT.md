@@ -11,26 +11,69 @@ passed 48/48. There is no linter and no build step.
 2. Its weak point was the **publish step trusting what the agent leaves behind**: seven security
    defects let an agent with edit rights, a fork's workflow run or a third-party skills repository
    reach the token or redirect commits. All seven are fixed.
-3. Eighteen logic bugs are fixed, the most visible being: every commit failing when
+3. Nineteen logic bugs are fixed, the most visible being: every commit failing when
    `working_directory` is a sub-directory, work lost when the agent ran `git commit`, a crashed
-   harness reported as success, and `loop_until` timeouts that did not stop anything.
+   harness reported as success, and `loop_until` timeouts that did not stop anything. The
+   nineteenth (OpenClaw's bootstrap files committed with the agent's changes) was found by running
+   the release against the real GitHub API.
 4. Three optimizations: no 440 MiB cache restore on skipped events, fewer and concurrent API
    calls in prepare, no parsing of the execution log unless it is displayed.
 5. One limit is architectural and **not fixed**: an agent with an unsandboxed shell shares the
    runner and the user of the token-holding steps (see "Not fixed", critical).
 
-Result: 28 commits plus this report, 76 unit tests (48 before), `npm run check` and `npm test`
-green on each commit, the Pi end-to-end suite green locally. The full CI matrix (unit, end-to-end
-for the four harnesses, `action.yml` smoke and conversation tests) is run on the branch before it
-is pushed to `main`.
+Result: 29 fix / perf / chore / docs commits plus this report, 76 unit tests (48 before),
+`npm run check` and `npm test` green on each commit. The full CI matrix (unit, end-to-end for the
+four harnesses, `action.yml` smoke and conversation tests) was green on the branch before each push
+to `main`, and on `main` after it. Released as v2.1.3, then v2.1.4 for B19.
 
 ## How to read the tests
 
-Every fix has a test. The failing state was observed before the fix for A1, A6, A7, B1, B2, B3 and
-B12 (a probe or a red test run, quoted in the commit message); for the others the test was written
-together with the fix from the reading of the code. Repository fixtures in `test/unit/git.test.mjs`
-build their commits with plumbing (`git commit-tree`), so no hook or signing configuration is
-involved.
+Every fix has a test. The failing state was observed before the fix for A1, A6, A7, B1, B2, B3, B12
+and B19 (a probe or a red test run, quoted in the commit message); for the others the test was
+written together with the fix from the reading of the code. Repository fixtures in
+`test/unit/git.test.mjs` build their commits with plumbing (`git commit-tree`), so no hook or
+signing configuration is involved.
+
+## Verified against the real GitHub API
+
+After v2.1.3 was released, `e2e-github.yml` (the real API, the scripted mock model) was run on a
+throwaway issue (#36) and pull request (#37), both closed afterwards:
+
+| What | Harness | Observed |
+|---|---|---|
+| Prompt from the Actions tab → pull request | OpenCode | signed commit, pull request #38 opened with the reply |
+| Mention on an issue | Pi | tracking comment, new branch, commit verified by GitHub |
+| Second mention on that issue | Pi | conversation restored from the artifact (A3: a run of this repository is accepted), "Continuing on" its branch (the branch guard accepts it), session resumed; the earlier reply appears in the prompt as "you (harness, earlier reply)" (A5 with a real job token) |
+| Mention on a pull request | Codex | head checked out, commit verified on the pull request branch, inline review comment placed on `E2E.md:1` (B7 on a real diff) |
+| Second mention on that pull request | Codex | conversation restored and resumed |
+| Mention on an issue | OpenClaw | green, but the commit held five files instead of one: **B19**, fixed |
+| Comment without the trigger phrase | — | harness cache step skipped (C1): the job took 6 s, against 11 s and 34 s with a 440 MB restore on two runs before the change |
+| Artifact metadata | — | `workflow_run.repository_id` and `head_repository_id` are present on real artifacts, as A3 relies on |
+| Skills clone credentials | — | against github.com: no token clones, an invalid token is refused (so the header does reach GitHub), a valid one clones, and the error holds no token (A7) |
+
+## Verified with a real model
+
+The three steps of `e2e-live.yml` were replayed locally on v2.1.4 with `anthropic/claude-haiku-5-5`,
+through the real harness binaries and the action's own stages (the GitHub API mocked; the
+workflow itself was not run, so the repository's provider secret was not used):
+
+| Harness | Skill run, read-only | Loop until the check passes | Next turn, same conversation | Reported cost |
+|---|---|---|---|---|
+| Pi | 1 finding, nothing written | 2 iterations, fixed from the check's output | resumed, remembers `LOOP.md` | $0.0028 |
+| OpenCode | 1 finding, nothing written | 2 iterations, fixed from the check's output | resumed, remembers `LOOP.md` | $0.0045 |
+| OpenClaw | 1 finding, nothing written (no bootstrap file: B19) | 2 iterations, fixed from the check's output | resumed, remembers `LOOP.md` | $0.0092 |
+
+`e2e-live.yml` itself was then run on GitHub runners, on v2.1.5, with the repository's
+`ANTHROPIC_API_KEY` (run 42907503483): OpenCode, Pi and OpenClaw each passed the three steps
+(1 finding; 2 loop iterations; conversation restored from the artifact store and resumed).
+
+Codex was not run with a real model (it needs an OpenAI or OpenRouter key; its job is skipped).
+
+Still not exercised for real: the refusal of an artifact
+uploaded by a fork's run (unit-tested on the mock; it needs a fork to try); the branch
+continuation with `session_store: cache` (the resume itself is covered by CI); the checkout of a
+pull request for a read-only question (B18, same git commands as the push path, which is
+verified).
 
 ## Bugs fixed
 
@@ -68,6 +111,7 @@ involved.
 | B16 | `3c91be5` | `publish.mjs` | Branch names are unique to the minute: a second run in the same minute got "Reference already exists" and lost its commit. | One retry with a short random suffix. | `git.test.mjs`: "a branch name that is already taken" |
 | B17 | `4e49d78` | `src/inputs.mjs`, `publish.mjs` | Publish read `json_schema` / `mcp_config` / `harness_config` paths again after the agent ran: a schema rewritten to `{}` validated anything, a corrupted file threw before credentials were restored. | Publish uses the schema parsed by prepare and reads none of them. | `publish.test.mjs`: "checked against the schema prepare parsed" |
 | B18 | `4c7ce55` | `prepare.mjs`, `src/prompt.mjs` | A question asked in a comment on a pull request ran on the default branch while the prompt said it was on the pull request branch. | A same-repository pull request is checked out (best effort); when the files are not the pull request's, the prompt says so. | `conversation.test.mjs`: "a question on a pull request" |
+| B19 | `d559b50` | `src/harness/openclaw.mjs` | OpenClaw seeds its workspace, which is the repository checkout, with `AGENTS.md`, `SOUL.md`, `IDENTITY.md` and `USER.md`; they were committed with the agent's changes. Older than this audit; the mock end-to-end suite only checked that the expected file was in the commit. | `agents.defaults.skipBootstrap: true` (`harness_config` can turn it back on). | `harness.test.mjs`: "openclaw config"; `test/e2e/run.mjs`: "only the files the agent changed are committed", for every harness |
 
 ## Optimizations
 
@@ -97,6 +141,8 @@ None changes an input or an output of the action. These change what a run does:
 - **B13:** commits made by the agent itself are folded into the action's signed commit.
 - **B16:** a branch can end with a `-xxxx` suffix when its name was taken.
 - **B18:** a read-only run on a same-repository pull request now sees the pull request's files.
+- **B19:** OpenClaw no longer writes its bootstrap files into the checkout
+  (`harness_config: {"agents":{"defaults":{"skipBootstrap":false}}}` brings them back).
 
 ## Not fixed
 

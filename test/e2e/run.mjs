@@ -179,6 +179,12 @@ async function scenario(harness, name) {
         const last = commits.at(-1) ?? [];
         return commits.length === 2 && commits[0].includes('.github/workflows/agent.yml') && last.includes('ECHO.md') && !last.includes('.github/workflows/agent.yml');
       })()],
+      // nothing a harness writes for itself in the working directory (state, bootstrap files)
+      ['only the files the agent changed are committed', (() => {
+        const last = gh.calls.filter((c) => c.path === '/graphql').at(-1)?.body?.variables?.input?.fileChanges?.additions?.map((a) => a.path) ?? [];
+        if (last.length !== 1) console.log(`   (committed: ${last.join(', ')})`);
+        return last.length === 1 && last[0] === 'ECHO.md';
+      })()],
       ['workflow file reported as not committed', comments.some((b) => /Not committed[\s\S]*agent\.yml/.test(b))],
       ['create-PR link', comments.some((b) => /quick_pull=1/.test(b))],
       ['publish green', pub.code === 0],
