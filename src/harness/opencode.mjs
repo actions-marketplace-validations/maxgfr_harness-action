@@ -78,7 +78,7 @@ export default {
     if (!model.provider && !endpoint.custom) throw new Error('opencode needs `model` as provider/model, e.g. anthropic/claude-sonnet-5-5');
   },
   streaming: true,
-  install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
+  install: ({ version, toolsDir, log, meta }) => npmInstall({ id: 'opencode', pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare(opts) {
     const { model, endpoint, home } = opts;

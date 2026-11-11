@@ -60,7 +60,7 @@ export default {
   id: 'codex',
   streaming: true,
   validate: validateEndpoint,
-  install: ({ version, toolsDir, log, meta }) => npmInstall({ pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
+  install: ({ version, toolsDir, log, meta }) => npmInstall({ id: 'codex', pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 
   prepare(opts) {
     const cfg = buildConfig(opts);

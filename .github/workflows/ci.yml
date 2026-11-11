@@ -40,7 +40,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .harness/tools
-          key: e2e-tools-v1-${{ runner.os }}-${{ matrix.harness }}-${{ hashFiles('src/harness/versions.json') }}
+          key: e2e-tools-v1-${{ runner.os }}-${{ matrix.harness }}-${{ hashFiles('src/harness/versions.json', 'src/harness/locks/*.json') }}
       - name: Git identity for the fixture repository
         run: git config --global user.name ci && git config --global user.email ci@example.com
       - run: node test/e2e/run.mjs --harness ${{ matrix.harness }}

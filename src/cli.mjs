@@ -61,7 +61,7 @@ async function main() {
     core.setOutput('harness', inputs.harness);
     core.setOutput('version', version);
     core.setOutput('cache_path', path.join(toolsDir, `${bin}-${version}`));
-    core.setOutput('cache_key', `harness-action-v1-${env.RUNNER_OS || process.platform}-${env.RUNNER_ARCH || process.arch}-${adapterId}-${version}`);
+    core.setOutput('cache_key', `harness-action-v2-${env.RUNNER_OS || process.platform}-${env.RUNNER_ARCH || process.arch}-${adapterId}-${version}`);
     core.setOutput('artifact_name', `harness-${(env.GITHUB_JOB || 'job').replace(/[^\w-]/g, '-')}-${inputs.harness}-${id.split('-').pop()}`);
     return 0;
   }

@@ -7,6 +7,7 @@ import http from 'node:http';
 import { createClient } from '../../src/github/api.mjs';
 import { runHarness } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
+import { lockFile, manifestOf } from '../../src/harness/install.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -139,6 +140,20 @@ test('mistakes the inputs alone show are reported before anything is posted or i
   fs.writeFileSync(path.join(work, '.claude', 'skills', 'lint', 'SKILL.md'), '---\nname: lint\n---\n');
   v('pi', { skill: 'lint' })();
   v('pi', { skill: 'remote-one', skills: 'acme/skills' })(); // known only after the clone
+});
+
+test('every pinned harness version has a lockfile of its whole dependency tree', () => {
+  const versions = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'harness', 'versions.json'), 'utf8'));
+  for (const [id, meta] of Object.entries(versions)) {
+    const file = lockFile(id, meta.version);
+    assert.ok(fs.existsSync(file), `${file} is missing: run node scripts/bump-harnesses.mjs --lock`);
+    const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(manifestOf(lock).dependencies, { [meta.package]: meta.version }, id); // exact, the pinned one
+    const top = lock.packages[`node_modules/${meta.package}`];
+    assert.equal(top.version, meta.version, id);
+    // (a bundled package ships inside its parent's tarball, which has the hash)
+    for (const [where, p] of Object.entries(lock.packages)) if (where && !p.link && !p.inBundle) assert.ok(p.integrity, `${id}: ${where} has no integrity hash`);
+  }
 });
 
 test('pi tool list keeps MCP tools', () => {
