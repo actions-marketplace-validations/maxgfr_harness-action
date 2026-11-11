@@ -171,19 +171,32 @@ export function dropLinks(dir) {
   return removed;
 }
 
-/** Puts back the modes `setupSandbox` recorded (a path that is gone is skipped). */
-function restoreModes(file) {
-  let listed = '';
-  try { listed = fs.readFileSync(file, 'utf8'); } catch { return; }
+/**
+ * What to give back, from the list `setupSandbox` recorded: mode → paths. Only a path that is
+ * still a plain file or directory is kept: one that is gone, or is now something else (a link),
+ * is left alone, since chmod given a link on its command line acts on what the link points to.
+ */
+export function modesToRestore(listed) {
   const byMode = new Map();
   for (const entry of listed.split('\0')) {
     const space = entry.indexOf(' ');
     if (space < 0) continue;
     const mode = entry.slice(0, space);
+    const p = entry.slice(space + 1);
+    let st = null;
+    try { st = fs.lstatSync(p); } catch {}
+    if (!st || !(st.isFile() || st.isDirectory())) continue;
     if (!byMode.has(mode)) byMode.set(mode, []);
-    byMode.get(mode).push(entry.slice(space + 1));
+    byMode.get(mode).push(p);
   }
-  for (const [mode, paths] of byMode) trySudo(['xargs', '-0', '-r', 'chmod', '-f', mode], { input: paths.join('\0'), stdio: ['pipe', 'ignore', 'ignore'] });
+  return byMode;
+}
+
+/** Puts back the modes `setupSandbox` recorded. */
+function restoreModes(file) {
+  let listed = '';
+  try { listed = fs.readFileSync(file, 'utf8'); } catch { return; }
+  for (const [mode, paths] of modesToRestore(listed)) trySudo(['xargs', '-0', '-r', 'chmod', '-f', mode], { input: paths.join('\0'), stdio: ['pipe', 'ignore', 'ignore'] });
 }
 
 /**

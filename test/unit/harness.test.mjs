@@ -8,7 +8,7 @@ import { createClient } from '../../src/github/api.mjs';
 import { runHarness, describe } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
 import { lockFile, manifestOf } from '../../src/harness/install.mjs';
-import { sandboxDecision, dropLinks, takeEnv, safePath } from '../../src/sandbox.mjs';
+import { sandboxDecision, dropLinks, takeEnv, safePath, modesToRestore } from '../../src/sandbox.mjs';
 import { readRegular } from '../../src/util.mjs';
 import { collect } from '../../src/contract.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
@@ -206,6 +206,19 @@ test('what the agent leaves cannot reach the runner: log lines, links, PATH', ()
   assert.deepEqual(collect(dir), { findings: [], inline: [], progress: '', structured: null });
   // PATH without the directories the agent could write
   assert.equal(safePath(['/w/repo/.venv/bin', '/usr/bin', '/w/repo', '/w/repository/bin', '/bin'].join(path.delimiter), ['/w/repo']), ['/usr/bin', '/w/repository/bin', '/bin'].join(path.delimiter));
+});
+
+test('modes are given back only to paths that are still plain files or directories', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-modes-'));
+  const file = path.join(dir, 'kept.txt');
+  const sub = path.join(dir, 'sub');
+  const now = path.join(dir, 'was-a-file');
+  fs.writeFileSync(file, 'k');
+  fs.mkdirSync(sub);
+  fs.symlinkSync('/etc/hosts', now); // a file the agent turned into a link
+  const listed = [`600 ${file}`, `755 ${sub}`, `644 ${now}`, `644 ${path.join(dir, 'gone.txt')}`].join('\0') + '\0';
+  const byMode = modesToRestore(listed);
+  assert.deepEqual(Object.fromEntries([...byMode].map(([m, ps]) => [m, ps])), { 600: [file], 755: [sub] });
 });
 
 test('pi tool list keeps MCP tools', () => {
