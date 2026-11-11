@@ -89,12 +89,28 @@ export function setupSandbox({ writable, sticky, readable, log = () => {} }) {
 }
 
 /**
- * The command that runs `argv` as the agent's user, with `env` (passed through sudo, never on
- * the command line, where every user of the machine could read it).
+ * The command that runs `argv` as the agent's user. Its environment goes through `envFile`, a file
+ * only that user can read: not on the command line, where every user of the machine could read
+ * it, and not through `sudo -E`, which many sudoers policies (GitHub-hosted runners' included)
+ * refuse. The process it starts reads the file, removes it, and takes the variables (`takeEnv`).
  */
-export function asAgent(sandbox, argv, { home }) {
+export function asAgent(sandbox, argv, { home, env, envFile }) {
   const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
-  return ['sudo', ['-n', '-E', '-u', sandbox.user, '--', 'env', `PATH=${process.env.PATH ?? ''}`, `HOME=${home}`, `SHELL=${shell}`, `USER=${sandbox.user}`, `LOGNAME=${sandbox.user}`, ...argv]];
+  fs.writeFileSync(envFile, JSON.stringify(env), { mode: 0o600 });
+  sudo(['chown', sandbox.user, envFile]);
+  return ['sudo', ['-n', '-u', sandbox.user, '--', 'env', `PATH=${env.PATH ?? process.env.PATH ?? ''}`, `HOME=${home}`, `SHELL=${shell}`, `USER=${sandbox.user}`, `LOGNAME=${sandbox.user}`, `HARNESS_ENV_FILE=${envFile}`, ...argv]];
+}
+
+/** In the process `asAgent` started: the environment it was given, once (the file goes). */
+export function takeEnv(target = process.env) {
+  const file = target.HARNESS_ENV_FILE;
+  if (!file) return;
+  const env = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.rmSync(file, { force: true });
+  // (what sudo set for the agent's user wins: its PATH, HOME, SHELL, USER, LOGNAME)
+  const own = ['PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME'];
+  for (const k of Object.keys(target)) if (!own.includes(k)) delete target[k];
+  for (const [k, v] of Object.entries(env)) if (!own.includes(k) || target[k] === undefined) target[k] = v;
 }
 
 /** Ends every process of the agent's user: nothing it started outlives the Run step. */

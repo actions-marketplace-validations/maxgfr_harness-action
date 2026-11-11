@@ -8,7 +8,7 @@ import { createClient } from '../../src/github/api.mjs';
 import { runHarness } from '../../src/runner.mjs';
 import { capture } from '../../src/harness/exec.mjs';
 import { lockFile, manifestOf } from '../../src/harness/install.mjs';
-import { sandboxDecision, dropLinks } from '../../src/sandbox.mjs';
+import { sandboxDecision, dropLinks, takeEnv } from '../../src/sandbox.mjs';
 import { buildConfig as opencodeConfig } from '../../src/harness/opencode.mjs';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, createAccumulator, permissionProfile, splitArgs } from '../../src/harness/index.mjs';
@@ -171,6 +171,13 @@ test('the agent gets its own user whenever it can run code, if the runner allows
   assert.throws(() => sandboxDecision({ mode: 'on', perms: noShell, support: no }), /cannot run the agent as its own user \(darwin runner\)/);
   assert.equal(sandboxDecision({ mode: 'on', perms: noShell, support: yes }).enabled, true);
   assert.equal(sandboxDecision({ mode: 'off', perms: shell, support: yes }).enabled, false);
+  // the agent's environment comes from its private file, once, and replaces what sudo left
+  const envFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ha-env-')), 'agent-env.json');
+  fs.writeFileSync(envFile, JSON.stringify({ ANTHROPIC_API_KEY: 'k', HARNESS_STATE_DIR: '/s', PATH: '/ignored' }));
+  const target = { HARNESS_ENV_FILE: envFile, PATH: '/usr/bin', HOME: '/h', SUDO_USER: 'runner', SUDO_COMMAND: 'x' };
+  takeEnv(target);
+  assert.deepEqual(target, { ANTHROPIC_API_KEY: 'k', HARNESS_STATE_DIR: '/s', PATH: '/usr/bin', HOME: '/h' });
+  assert.ok(!fs.existsSync(envFile));
   // what is uploaded holds no link
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ha-links-'));
   fs.mkdirSync(path.join(dir, 'a'));

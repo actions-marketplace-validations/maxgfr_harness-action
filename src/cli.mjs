@@ -26,6 +26,7 @@ function loadInputs(env) {
 
 async function main() {
   const cmd = process.argv[2];
+  if (cmd === 'run-as-agent') (await import('./sandbox.mjs')).takeEnv();
   const env = loadInputs(process.env);
   // Real path, like the working directory (see prepare): no symlink in any path a harness sees.
   const tmpRaw = env.RUNNER_TEMP || os.tmpdir();
@@ -88,11 +89,12 @@ async function main() {
     }
     const { asAgent, killAgent } = await import('./sandbox.mjs');
     const { sanitizedEnv } = await import('./util.mjs');
-    const [bin, args] = asAgent(plan.sandbox, [process.execPath, fileURLToPath(import.meta.url), 'run-as-agent'], { home: plan.home });
+    const [bin, args] = asAgent(plan.sandbox, [process.execPath, fileURLToPath(import.meta.url), 'run-as-agent'], { home: plan.home, env: sanitizedEnv(env, { HARNESS_STATE_DIR: stateDir }), envFile: path.join(stateDir, 'agent-env.json') });
     core.info(`Running the agent as the user ${plan.sandbox.user}.`);
-    const r = spawnSync(bin, args, { stdio: 'inherit', env: sanitizedEnv(env, { HARNESS_STATE_DIR: stateDir }) });
+    const r = spawnSync(bin, args, { stdio: 'inherit', env: { PATH: env.PATH ?? '' } });
     if (r.status !== 0) core.warning(`The run as ${plan.sandbox.user} ended with ${r.error?.message ?? `exit code ${r.status ?? r.signal}`}.`);
     killAgent(plan.sandbox); // nothing it started outlives this step
+    fs.rmSync(path.join(stateDir, 'agent-env.json'), { force: true }); // (if the run never got to read it)
     return 0;
   }
   if (cmd === 'run-as-agent') {
