@@ -61,7 +61,7 @@ test('tag mode intent: questions are answered, action verbs act', () => {
 test('inputs: validation and defaults', () => {
   const i = inputs();
   assert.equal(i.harness, 'opencode');
-  assert.equal(i.triggerPhrase, '@harness');
+  assert.deepEqual(i.triggerPhrases, ['@harness']);
   assert.equal(effectiveTools('auto', 'tag'), 'edit');
   assert.equal(effectiveTools('auto', 'automation'), 'read-only');
   assert.throws(() => inputs({ harness: 'nope' }), /harness must be one of/);

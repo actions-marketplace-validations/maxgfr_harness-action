@@ -111,13 +111,13 @@ inputs:
     required: false
     default: '30'
   budget_usd:
-    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and OpenClaw report cost; Codex does not; OpenClaw is checked after each turn). Empty = no budget.'
+    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and OpenClaw report cost; Codex does not, so it refuses a budget; OpenClaw is checked after each turn). Empty = no budget.'
     required: false
     default: ''
 
   # ── tag mode ──────────────────────────────────────────────────────────────────────────────
   trigger_phrase:
-    description: 'Phrase that wakes the agent up in comments, reviews, issue and PR bodies.'
+    description: 'Phrase that wakes the agent up in comments, reviews, issue and PR bodies. Several: comma or newline separated, e.g. `@harness, /h`.'
     required: false
     default: '@harness'
   label_trigger:

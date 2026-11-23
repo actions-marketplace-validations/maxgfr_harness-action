@@ -158,8 +158,11 @@ async function ciStatus(github, ctx, sha) {
 }
 
 /** Throws on what the inputs alone show cannot work. */
-export function validateRun({ adapter, model, endpoint }) {
+export function validateRun({ adapter, model, endpoint, budgetUsd }) {
   adapter.validate?.({ model, endpoint });
+  if (adapter.reportsCost === false && budgetUsd > 0) {
+    throw new Error(`${adapter.id} does not report cost, so budget_usd cannot be enforced: use max_steps / timeout_minutes, or a harness that reports cost (opencode, pi, openclaw).`);
+  }
 }
 
 /**
@@ -219,7 +222,7 @@ export async function prepare({ env = process.env, stateDir, toolsDir }) {
   const isPR = ctx.isPR;
   // Mistakes in the inputs are reported now, before a tracking comment is posted and the harness
   // is installed: only what depends on a clone (a skill from `skills`) is left for later.
-  validateRun({ adapter, model, endpoint });
+  validateRun({ adapter, model, endpoint, budgetUsd: inputs.budgetUsd });
 
   const own = ownComments(github);
   const listComments = commentLister(github, ctx);

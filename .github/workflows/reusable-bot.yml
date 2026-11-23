@@ -1,0 +1,126 @@
+name: harness bot (reusable)
+
+# Tag mode for any repository: mention the trigger phrase in an issue, a pull request or a review
+# comment, apply the `harness` label or assign the bot. Call it from a workflow that listens to
+# those events and grants the permissions below (a called workflow gets no more than its caller):
+#
+#   on:
+#     issue_comment: { types: [created] }
+#     pull_request_review_comment: { types: [created] }
+#     issues: { types: [opened, assigned, labeled] }
+#   jobs:
+#     harness:
+#       permissions: { contents: write, pull-requests: write, issues: write, actions: read }
+#       uses: maxgfr/harness-action/.github/workflows/reusable-bot.yml@v2
+#       with: { model: anthropic/claude-sonnet-5-5 }
+#       secrets: inherit
+#
+# No job-level `if:` on the trigger phrase: `trigger_phrase` may be a list, which an expression
+# cannot split. The action itself exits in seconds, before installing anything, when the event
+# does not trigger it. For the same reason there is no `concurrency:` here: every comment would
+# join the group, and a pending mention would be cancelled by the next unrelated comment. A
+# caller that knows its phrase filters and serialises on its own job:
+#
+#       if: contains(github.event.comment.body || github.event.issue.body || '', '@harness') || github.event.action == 'labeled' || github.event.action == 'assigned'
+#       concurrency: { group: 'harness-${{ github.event.issue.number || github.event.pull_request.number }}' }
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: '`opencode`, `codex`, `pi` or `openclaw`.'
+        type: string
+        default: 'opencode'
+      harness_version:
+        description: 'Harness npm version. Empty = the version pinned by the action.'
+        type: string
+        default: ''
+      model:
+        description: '`provider/model`, e.g. `anthropic/claude-sonnet-5-5`.'
+        type: string
+        required: true
+      skills:
+        description: 'Skill sources, one per line.'
+        type: string
+        default: ''
+      skill:
+        description: 'The skill the agent must use.'
+        type: string
+        default: ''
+      allow_bash:
+        description: 'Shell commands allowed at the `edit` level, one glob per line.'
+        type: string
+        default: ''
+      trigger_phrase:
+        description: 'Phrase(s) that wake the agent up, comma or newline separated.'
+        type: string
+        default: '@harness'
+      ask_mode:
+        description: '`auto`, `always` or `off`.'
+        type: string
+        default: 'auto'
+      loop_until:
+        description: 'Command that must pass for the task to be done.'
+        type: string
+        default: ''
+      max_iterations:
+        description: 'Turns the agent gets. Empty = 1, or 5 with `loop_until`.'
+        type: string
+        default: ''
+      timeout_minutes:
+        description: 'Stop the agent after this many minutes.'
+        type: string
+        default: '30'
+      runs_on:
+        description: 'Runner label, or a JSON array of labels.'
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      HARNESS_GITHUB_TOKEN:
+        description: 'Token for the GitHub API instead of the job token, e.g. a personal access token.'
+        required: false
+      ANTHROPIC_API_KEY: { required: false }
+      OPENAI_API_KEY: { required: false }
+      OPENROUTER_API_KEY: { required: false }
+      OPENCODE_API_KEY: { required: false }
+      GEMINI_API_KEY: { required: false }
+      DEEPSEEK_API_KEY: { required: false }
+      GROQ_API_KEY: { required: false }
+      MISTRAL_API_KEY: { required: false }
+      XAI_API_KEY: { required: false }
+      TOGETHER_API_KEY: { required: false }
+
+jobs:
+  harness:
+    runs-on: ${{ startsWith(inputs.runs_on, '[') && fromJSON(inputs.runs_on) || inputs.runs_on }}
+    permissions:
+      contents: write        # push branches / commits
+      pull-requests: write   # reviews, PR comments
+      issues: write          # issue comments
+      actions: read          # find the saved conversation (session)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: maxgfr/harness-action@v2
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+        with:
+          harness: ${{ inputs.harness }}
+          harness_version: ${{ inputs.harness_version }}
+          model: ${{ inputs.model }}
+          skills: ${{ inputs.skills }}
+          skill: ${{ inputs.skill }}
+          allow_bash: ${{ inputs.allow_bash }}
+          trigger_phrase: ${{ inputs.trigger_phrase }}
+          ask_mode: ${{ inputs.ask_mode }}
+          loop_until: ${{ inputs.loop_until }}
+          max_iterations: ${{ inputs.max_iterations }}
+          timeout_minutes: ${{ inputs.timeout_minutes }}
+          github_token: ${{ secrets.HARNESS_GITHUB_TOKEN || github.token }}

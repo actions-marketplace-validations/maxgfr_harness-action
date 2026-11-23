@@ -5,9 +5,30 @@
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-export function containsTrigger(text, phrase) {
-  if (!text || !phrase) return false;
-  return new RegExp(`(^|[^\\w-])${escapeRe(phrase)}(?![\\w-])`, 'i').test(text);
+/**
+ * Any of the trigger phrases as a whole token: `@harness` matches in "hey @harness fix", not in
+ * "me@harness.dev" or "@harness-bot". Longest first, so a phrase that prefixes another loses.
+ */
+export function triggerRegex(phrases, flags = 'i') {
+  const list = [phrases].flat().filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!list.length) return null;
+  return new RegExp(`(?<![\\w-])(?:${list.map(escapeRe).join('|')})(?![\\w-])`, flags);
+}
+
+/** The trigger phrase `text` mentions first, or null. */
+export function findTrigger(text, phrases) {
+  if (!text) return null;
+  return triggerRegex(phrases)?.exec(text)?.[0] ?? null;
+}
+
+export function containsTrigger(text, phrases) {
+  return findTrigger(text, phrases) !== null;
+}
+
+/** `text` without any trigger phrase. */
+export function stripTriggers(text, phrases) {
+  const re = triggerRegex(phrases, 'gi');
+  return re ? String(text).replace(re, '') : String(text);
 }
 
 export function globToRegex(glob) {
@@ -26,7 +47,7 @@ export function matchesAny(value, globs) {
  */
 export function detectMode(ctx, inputs) {
   const p = ctx.payload;
-  const phrase = inputs.triggerPhrase;
+  const phrases = inputs.triggerPhrases;
   let triggerText = null;
   let reason = '';
   let trigger = 'mention';
@@ -36,16 +57,16 @@ export function detectMode(ctx, inputs) {
   switch (ctx.eventName) {
     case 'issue_comment':
     case 'pull_request_review_comment':
-      if (['created', 'edited'].includes(ctx.action) && containsTrigger(p.comment?.body, phrase)) {
+      if (['created', 'edited'].includes(ctx.action) && containsTrigger(p.comment?.body, phrases)) {
         triggerText = p.comment.body;
-        reason = `comment mentions ${phrase}`;
+        reason = `comment mentions ${findTrigger(triggerText, phrases)}`;
         author = by(p.comment.user);
       }
       break;
     case 'pull_request_review':
-      if (ctx.action === 'submitted' && containsTrigger(p.review?.body, phrase)) {
+      if (ctx.action === 'submitted' && containsTrigger(p.review?.body, phrases)) {
         triggerText = p.review.body;
-        reason = `review mentions ${phrase}`;
+        reason = `review mentions ${findTrigger(triggerText, phrases)}`;
         author = by(p.review.user);
       }
       break;
@@ -58,18 +79,18 @@ export function detectMode(ctx, inputs) {
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
         reason = `label "${inputs.labelTrigger}" applied`;
         trigger = 'label';
-      } else if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && (containsTrigger(p.issue?.body, phrase) || containsTrigger(p.issue?.title, phrase))) {
+      } else if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && (containsTrigger(p.issue?.body, phrases) || containsTrigger(p.issue?.title, phrases))) {
         // (with a prompt, an issue / PR event is an automation: the body is context, not a request)
         triggerText = `${p.issue.title}\n\n${p.issue.body ?? ''}`;
-        reason = `issue mentions ${phrase}`;
+        reason = `issue mentions ${findTrigger(triggerText, phrases)}`;
         author = by(p.issue.user);
       }
       break;
     case 'pull_request':
     case 'pull_request_target':
-      if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && containsTrigger(p.pull_request?.body, phrase)) {
+      if (!inputs.prompt && ['opened', 'edited'].includes(ctx.action) && containsTrigger(p.pull_request?.body, phrases)) {
         triggerText = `${p.pull_request.title}\n\n${p.pull_request.body ?? ''}`;
-        reason = `pull request mentions ${phrase}`;
+        reason = `pull request mentions ${findTrigger(p.pull_request.body, phrases)}`;
         author = by(p.pull_request.user);
       }
       break;
@@ -79,7 +100,7 @@ export function detectMode(ctx, inputs) {
 
   if (triggerText !== null) return { mode: 'tag', reason, triggerText, trigger, author };
   if (inputs.prompt) return { mode: 'automation', reason: 'prompt input supplied', triggerText: null };
-  return { mode: 'skip', reason: `no prompt and no ${phrase} trigger in this ${ctx.eventName || 'event'}`, triggerText: null };
+  return { mode: 'skip', reason: `no prompt and no ${phrases.join(' / ')} trigger in this ${ctx.eventName || 'event'}`, triggerText: null };
 }
 
 /**
@@ -92,7 +113,7 @@ export function intentFor(modeInfo, inputs) {
   if (modeInfo.mode !== 'tag' || inputs.askMode === 'off') return 'do';
   if (inputs.askMode === 'always') return 'ask';
   if (modeInfo.trigger === 'label' || modeInfo.trigger === 'assignee') return 'do';
-  return classifyIntent(modeInfo.triggerText, inputs.triggerPhrase);
+  return classifyIntent(modeInfo.triggerText, inputs.triggerPhrases);
 }
 
 // Verbs that ask for a change, at the start of the request (after "please", "can you"…).
@@ -121,11 +142,12 @@ const FORCED = /^(ask|do)(?![\p{L}\p{N}_'’-])(?!\s+(?:you|we|i|they|not|n't)\b
 
 /**
  * Tag mode: is this a question (answer it, read-only, with recommendations) or a request to
- * change code? `ask` / `do` right after the trigger phrase force it.
+ * change code? `ask` / `do` right after a trigger phrase force it.
  *
  * Heuristic, in order:
- *  1. Keep only the text after the FIRST occurrence of `phrase` (case-insensitive). Anything
- *     before it is ignored; if `phrase` is absent, the whole text is used.
+ *  1. Keep only the text after the FIRST trigger phrase (case-insensitive; whichever of
+ *     `phrases` comes first as a whole token, else as a bare substring). Anything before it is
+ *     ignored; if no phrase is present, the whole text is used.
  *  2. A leading `ask` / `do` forces the result (`@harness do: the fix`, `@harness ask fix or rewrite?`).
  *     Ordinary sentences such as "do you think…", "do not change…" or "does this…" do not count.
  *  3. Strip politeness / filler (`LEAD`: "please", "can you", "peux-tu"…), then a scoping preamble
@@ -143,18 +165,25 @@ const FORCED = /^(ask|do)(?![\p{L}\p{N}_'’-])(?!\s+(?:you|we|i|they|not|n't)\b
  * iteration. For `issues` and `pull_request` events, `text` is the title followed by the body.
  *
  * @param {string} text The text that triggered the run (comment body, or title + body).
- * @param {string} phrase The trigger phrase, e.g. `@harness`.
+ * @param {string|string[]} phrases The trigger phrase(s), e.g. `['@harness', '/h']`.
  * @returns {'ask'|'do'}
  */
-export function classifyIntent(text, phrase) {
-  const idx = text.toLowerCase().indexOf(phrase.toLowerCase());
-  let req = (idx >= 0 ? text.slice(idx + phrase.length) : text).trim();
+export function classifyIntent(text, phrases) {
+  let req = afterTrigger(text, [phrases].flat().filter(Boolean)).trim();
   const forced = FORCED.exec(req);
   if (forced) return forced[1].toLowerCase();
   req = req.replace(LEAD, '').replace(SCOPE, '').replace(LEAD, '');
   const first = (/^[\p{L}-]+/u.exec(req)?.[0] ?? '').toLowerCase();
   if (ASK_LEADS.includes(first)) return 'ask';
   return DO_VERBS.includes(first) ? 'do' : 'ask';
+}
+
+function afterTrigger(text, phrases) {
+  const m = triggerRegex(phrases)?.exec(text);
+  if (m) return text.slice(m.index + m[0].length);
+  const lower = text.toLowerCase();
+  const hits = phrases.map((p) => [lower.indexOf(p.toLowerCase()), p]).filter(([i]) => i >= 0).sort((a, b) => a[0] - b[0] || b[1].length - a[1].length);
+  return hits.length ? text.slice(hits[0][0] + hits[0][1].length) : text;
 }
 
 /** Does this run publish into a tracking comment on an issue / PR? */

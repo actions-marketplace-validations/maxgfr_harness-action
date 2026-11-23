@@ -129,11 +129,18 @@ test('mistakes the inputs alone show are reported before anything is posted or i
     const i = readInputs(Object.fromEntries(Object.entries({ model: 'anthropic/m', harness, ...over }).map(([k, x]) => [`INPUT_${k.toUpperCase()}`, x])));
     const model = { provider: i.model.split('/')[0], id: i.model.split('/').slice(1).join('/') };
     if (!i.model.includes('/')) Object.assign(model, { provider: '', id: i.model });
-    return () => { validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }) }); checkSkillAvailable({ inputs: i, workDir: work }); };
+    return () => { validateRun({ adapter: getAdapter(harness), model, endpoint: resolveEndpoint({ provider: model.provider, baseUrl: i.baseUrl, apiKeyEnv: i.apiKeyEnv }), budgetUsd: i.budgetUsd }); checkSkillAvailable({ inputs: i, workDir: work }); };
   };
   assert.throws(v('codex'), /only speaks OpenAI-compatible/);
   assert.throws(v('codex', { model: 'acme/m' }), /does not know provider "acme"/);
   v('codex', { model: 'openrouter/anthropic/m' })();
+  // codex speaks only the Responses API, which some known providers do not serve
+  assert.throws(v('codex', { model: 'deepseek/deepseek-chat' }), /Responses API/);
+  assert.throws(v('codex', { model: 'google/x' }), /Responses API/);
+  v('codex', { model: 'openrouter/deepseek/deepseek-chat' })();
+  // codex reports no cost: a budget it cannot enforce is refused
+  assert.throws(v('codex', { model: 'openai/gpt-5.1', budget_usd: '1' }), /budget_usd cannot be enforced/);
+  v('opencode', { model: 'openai/gpt-5.1', budget_usd: '1' })();
   assert.throws(v('opencode', { model: 'bare-model' }), /needs `model` as provider\/model/);
   assert.throws(v('openclaw', { model: 'bare-model' }), /needs `model` as provider\/model/);
   v('pi', { model: 'bare-model' })(); // pi has a default provider
