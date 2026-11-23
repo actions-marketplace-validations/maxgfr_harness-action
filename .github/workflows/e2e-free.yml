@@ -1,0 +1,92 @@
+name: E2E (free models)
+
+# The live scenarios of e2e-scenarios.yml on every push, with no secret and no cost: OpenCode's
+# free models answer without a key, through the opencode CLI only — so the harness is opencode
+# (the four harnesses are covered by the mock e2e of ci.yml and by e2e-live.yml). Free, so with
+# `extended`: every feature that needs no GitHub write access. The model is picked from
+# OpenCode's live catalog (scripts/free-model.mjs). Free models get rate-limited or withdrawn,
+# so a failed run (core or extended) is retried once, whole, on the next candidate; `free-e2e`
+# is the one check to require. Releases do not wait on it: a free-tier outage must not block one.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'opencode/<free model> to force (empty = pick from the live catalog)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: e2e-free-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      model: ${{ steps.pick.outputs.model }}
+      fallback: ${{ steps.pick.outputs.fallback }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Pick a free model
+        id: pick
+        env:
+          FORCED: ${{ inputs.model }}
+        run: |
+          if [ -n "$FORCED" ]; then
+            printf 'model=%s\ncandidates=["%s"]\nfallback=\n' "$FORCED" "$FORCED" | tee -a "$GITHUB_OUTPUT"
+          else
+            node scripts/free-model.mjs
+          fi
+
+  live:
+    needs: pick
+    uses: ./.github/workflows/e2e-scenarios.yml
+    with:
+      harness: opencode
+      model: ${{ needs.pick.outputs.model }}
+      label: free
+      extended: true
+
+  # one retry on the next candidate, so a single rate-limited model does not fail the run
+  live-fallback:
+    needs: [pick, live]
+    if: always() && needs.live.result == 'failure' && needs.pick.outputs.fallback != ''
+    uses: ./.github/workflows/e2e-scenarios.yml
+    with:
+      harness: opencode
+      model: ${{ needs.pick.outputs.fallback }}
+      label: free-fallback
+      extended: true
+
+  free-e2e:
+    needs: [pick, live, live-fallback]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Live or fallback passed
+        env:
+          PICK: ${{ needs.pick.result }}
+          LIVE: ${{ needs.live.result }}
+          FALLBACK: ${{ needs.live-fallback.result }}
+          MODEL: ${{ needs.pick.outputs.model }}
+          FALLBACK_MODEL: ${{ needs.pick.outputs.fallback }}
+        run: |
+          echo "pick=$PICK | live=$LIVE ($MODEL) | fallback=$FALLBACK (${FALLBACK_MODEL:-none})"
+          if [ "$PICK" != success ]; then echo "::error::No free model was picked"; exit 1; fi
+          if [ "$LIVE" = success ]; then exit 0; fi
+          if [ "$FALLBACK" = success ]; then echo "::warning::$MODEL failed; passed on $FALLBACK_MODEL"; exit 0; fi
+          echo "::error::The live scenarios failed on every free model tried"
+          exit 1

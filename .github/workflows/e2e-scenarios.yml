@@ -1,0 +1,432 @@
+name: E2E scenarios (live model)
+
+# The live scenarios, against one harness and one real model — called by e2e-live.yml (paid
+# providers, manual) and e2e-free.yml (OpenCode's free models, no secret):
+#   1. a skill run (read-only): the skill is loaded and its finding reported;
+#   2. loop mode: the agent must create LOOP.md so that `loop_until` passes;
+#   3. a second turn in the SAME session (restored from the artifact store) must remember 2.
+# An empty `model` picks the per-harness default from the secrets passed: anthropic/… for all
+# but codex, which needs OPENAI_API_KEY (or OPENROUTER_API_KEY) and is skipped without it.
+# `extended` (free models only: it costs ~7 more runs) adds a second job, one feature per
+# scenario, none sharing a session: ask (read-only), structured output, the fail_on gate,
+# max_steps, allow_bash, an mcp_config server, and what a full-shell agent can reach.
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: 'opencode | codex | pi | openclaw'
+        type: string
+        required: true
+      model:
+        description: 'provider/model (empty = the per-harness default)'
+        type: string
+        required: false
+        default: ''
+      label:
+        description: 'Tells the sessions of two calls in one run apart (default: the harness)'
+        type: string
+        required: false
+        default: ''
+      extended:
+        description: 'Also run the extended scenarios (needs an explicit `model`)'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      OPENROUTER_API_KEY:
+        required: false
+      OPENCODE_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      SESSION_KEY: live-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.label || inputs.harness }}
+    steps:
+      # `uses: ./` below is the caller's repository, as checked out here
+      - uses: actions/checkout@v7
+      - name: Model
+        id: m
+        env:
+          H: ${{ inputs.harness }}
+          M: ${{ inputs.model }}
+        run: |
+          if [ -n "$M" ]; then model="$M"
+          elif [ "$H" = codex ]; then
+            if [ -n "$OPENAI_API_KEY" ]; then model=openai/gpt-5.1-codex-mini
+            elif [ -n "$OPENROUTER_API_KEY" ]; then model=openrouter/openai/gpt-5.1-codex-mini
+            else model=; fi
+          else model=anthropic/claude-haiku-5-5; fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          if [ -z "$model" ]; then echo "::notice::$H skipped: no OPENAI_API_KEY / OPENROUTER_API_KEY secret"; fi
+
+      - name: 1 · skill run (read-only)
+        id: skill
+        if: steps.m.outputs.model != ''
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ steps.m.outputs.model }}
+          skills: ./test/fixtures/skills
+          skill: echo-check
+          tools: read-only
+          prompt: Run the echo check on this repository. You are read-only, so do not create files; report the finding.
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+
+      # The check asks, in its failure output only, for a random token it draws on its first run:
+      # the agent cannot guess it, so passing proves it read the check output and fixed its work.
+      - name: Completion check with a token only its output reveals
+        if: steps.m.outputs.model != ''
+        run: |
+          # written here, by the job's user: the check runs as the agent's user, which can read
+          # $RUNNER_TEMP but not write to it
+          openssl rand -hex 4 > "$RUNNER_TEMP/loop-token"
+          chmod 644 "$RUNNER_TEMP/loop-token"
+          cat > "$RUNNER_TEMP/loop-check.sh" <<'EOF'
+          t="token-$(cat "$RUNNER_TEMP/loop-token")"
+          grep -qx 'harness-loop-ok' LOOP.md 2>/dev/null && grep -qx "$t" LOOP.md && exit 0
+          echo "FAILED: LOOP.md must contain the line harness-loop-ok AND the line $t"
+          exit 1
+          EOF
+
+      - name: 2 · loop until LOOP.md is right
+        id: loop
+        if: steps.m.outputs.model != ''
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ steps.m.outputs.model }}
+          tools: full
+          prompt: Create a file named LOOP.md at the repository root containing the line harness-loop-ok, then stop. Do not run any check yourself.
+          loop_until: bash "$RUNNER_TEMP/loop-check.sh"
+          max_iterations: '3'
+          session_key: ${{ env.SESSION_KEY }}
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+
+      - name: 3 · same conversation, next turn
+        id: resume
+        if: steps.m.outputs.model != ''
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ steps.m.outputs.model }}
+          tools: read-only
+          prompt: Without reading any file, answer from memory of this conversation only — what is the exact name of the file you created in your previous turn? Answer with the file name only.
+          session_key: ${{ env.SESSION_KEY }}
+          budget_usd: '0.50'
+          timeout_minutes: '10'
+          on_agent_error: fail
+
+      - name: Check
+        if: steps.m.outputs.model != ''
+        env:
+          SKILL: ${{ steps.skill.outputs.conclusion }}
+          FINDINGS: ${{ steps.skill.outputs.findings_count }}
+          LOOP: ${{ steps.loop.outputs.conclusion }}
+          ITER: ${{ steps.loop.outputs.iterations }}
+          RESUME: ${{ steps.resume.outputs.conclusion }}
+          RESUMED: ${{ steps.resume.outputs.resumed }}
+          REPORT: ${{ steps.resume.outputs.report_dir }}
+        run: |
+          echo "skill=$SKILL findings=$FINDINGS | loop=$LOOP iterations=$ITER | resume=$RESUME resumed=$RESUMED"
+          echo "--- turn 3 answer:"; cat "$REPORT/final.md"; echo
+          test "$SKILL" = success
+          test "$FINDINGS" -ge 1
+          test "$LOOP" = success
+          test "$ITER" -ge 2   # the check failed once and the agent fixed it from its output
+          grep -qx 'harness-loop-ok' LOOP.md
+          grep -qx "token-$(cat "$RUNNER_TEMP/loop-token")" LOOP.md
+          test "$RESUME" = success
+          test "$RESUMED" = true
+          grep -q 'LOOP.md' "$REPORT/final.md"
+
+  # One feature per scenario, each with its own Check; a failed scenario does not stop the next.
+  extended:
+    if: inputs.extended && inputs.model != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Working tree before
+        run: git status --porcelain > "$RUNNER_TEMP/tree-before"
+
+      # first, while the tree is clean: read-only must leave it as it was
+      - name: 4 · ask (read-only)
+        id: ask
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: read-only
+          prompt: |
+            Answer this question without changing anything. Read the file src/inputs.mjs and find the function named sessionArtifactName. What string does it return? Quote the template string exactly as it is written in the code, then explain it in one sentence.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: fail
+      - name: Check · ask
+        if: ${{ !cancelled() }}
+        env:
+          CONCLUSION: ${{ steps.ask.outputs.conclusion }}
+          REPORT: ${{ steps.ask.outputs.report_dir }}
+        run: |
+          echo "conclusion=$CONCLUSION"; echo "--- answer:"; cat "$REPORT/final.md"; echo
+          test "$CONCLUSION" = success
+          test -s "$REPORT/final.md"
+          grep -q 'harness-session' "$REPORT/final.md"   # it read the code
+          git status --porcelain | diff "$RUNNER_TEMP/tree-before" -   # and changed nothing
+
+      - name: 5 · structured output
+        id: structured
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: read-only
+          json_schema: '{"type":"object","required":["files","language"],"properties":{"files":{"type":"integer","minimum":1},"language":{"type":"string","minLength":1}}}'
+          prompt: |
+            List the directory src/ (only src/ itself, not its subdirectories) and count the files in it whose name ends in .js or .mjs. Then submit the result by calling the tool submit_structured_output exactly once, with "files" set to that count (an integer) and "language" set to the main programming language of the repository.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: fail
+      - name: Check · structured output
+        if: ${{ !cancelled() }}
+        env:
+          CONCLUSION: ${{ steps.structured.outputs.conclusion }}
+          OUT: ${{ steps.structured.outputs.structured_output }}
+        run: |
+          echo "conclusion=$CONCLUSION structured_output=$OUT"
+          test "$CONCLUSION" = success
+          # shellcheck disable=SC2016  # (JavaScript, in single quotes)
+          node -e '
+            const o = JSON.parse(process.env.OUT);
+            if (!Number.isInteger(o.files) || o.files < 1) throw new Error(`files must be an integer >= 1, got ${o.files}`);
+            if (typeof o.language !== "string" || !o.language.trim()) throw new Error("language must be a non-empty string");
+          '
+
+      # The skill reports a `warning`: fail_on warning must fail the step while the agent's own
+      # run succeeded (on_agent_error: warn, so the conclusion output tells the two apart).
+      - name: 6 · gate (fail_on)
+        id: gate
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          skills: ./test/fixtures/skills
+          skill: echo-check
+          tools: read-only
+          fail_on: warning
+          prompt: Run the echo check on this repository. You are read-only, so do not create files; report the finding.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: warn
+      - name: Check · gate
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOME: ${{ steps.gate.outcome }}
+          CONCLUSION: ${{ steps.gate.outputs.conclusion }}
+          FINDINGS: ${{ steps.gate.outputs.findings_count }}
+          REPORT: ${{ steps.gate.outputs.report_dir }}
+        run: |
+          echo "outcome=$OUTCOME conclusion=$CONCLUSION findings=$FINDINGS"
+          test "$OUTCOME" = failure    # the gate failed the step…
+          test "$CONCLUSION" = success # …not the agent run
+          test "$FINDINGS" -ge 1
+          node -e '
+            const f = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (!f.some((x) => x.severity === "warning")) throw new Error("no warning finding in findings.json");
+          ' "$REPORT/findings.json"
+
+      - name: 7 · max_steps
+        id: capped
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: read-only
+          max_steps: '1'
+          prompt: |
+            Read these five files one after the other, with one separate read tool call for each: README.md, package.json, action.yml, LICENSE, src/inputs.mjs. Then say how many lines each one has.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: warn
+      - name: Check · max_steps
+        if: ${{ !cancelled() }}
+        env:
+          CONCLUSION: ${{ steps.capped.outputs.conclusion }}
+          REPORT: ${{ steps.capped.outputs.report_dir }}
+        run: |
+          status=$(node -p 'require(process.argv[1]).status' "$REPORT/../run.json")
+          echo "conclusion=$CONCLUSION status=$status"
+          test "$CONCLUSION" = failure
+          test "$status" = max_steps
+
+      # The agent could create DENIED.txt with its write tool, but not with the runner's hostname
+      # in it: only running `hostname` gives that. A.txt must come from a shell call.
+      - name: 8 · allow_bash
+        id: bash
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: edit
+          allow_bash: echo *
+          prompt: |
+            Use your shell tool to run exactly these two commands, each in its own separate shell tool call, one after the other:
+            1. `echo allowed > A.txt`
+            2. `hostname > DENIED.txt`
+            The second command is expected to be refused. If it is refused, do not create DENIED.txt in any other way and do not try another command. Do not use any tool other than the shell. Then stop.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: warn
+      - name: Check · allow_bash
+        if: ${{ !cancelled() }}
+        env:
+          LOG: ${{ steps.bash.outputs.execution_file }}
+        run: |
+          grep -qx 'allowed' A.txt
+          if [ -e DENIED.txt ] && grep -qF "$(hostname)" DENIED.txt; then echo "::error::hostname ran"; exit 1; fi
+          # shellcheck disable=SC2016  # (JavaScript, in single quotes)
+          HOST="$(hostname)" node -e '
+            const ev = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map(JSON.parse);
+            const calls = ev.flatMap((e, i) => e.t === "tool" && /^(bash|shell)$/.test(e.name) && ev[i + 1]?.t === "tool_result" ? [{ cmd: String(e.input?.command ?? ""), res: ev[i + 1] }] : []);
+            for (const c of calls) console.log(`${c.res.error ? "refused" : "ran"}: ${c.cmd}`);
+            if (!calls.some((c) => /^\s*echo\b/.test(c.cmd) && !c.res.error)) throw new Error("no allowed echo ran through the shell");
+            if (calls.some((c) => String(c.res.output).includes(process.env.HOST))) throw new Error("a refused command ran: its output has the hostname");
+          ' "$LOG"
+
+      # The fixture server gets the word through the `env` of mcp_config only.
+      - name: MCP server config
+        id: mcp
+        if: ${{ !cancelled() }}
+        run: |
+          word="word-$(openssl rand -hex 4)"
+          echo "word=$word" >> "$GITHUB_OUTPUT"
+          node -e 'console.log("config=" + JSON.stringify({ echo: { command: process.execPath, args: [process.argv[1]], env: { SECRET_WORD: process.argv[2] } } }))' \
+            "$GITHUB_WORKSPACE/test/fixtures/mcp/echo-server.mjs" "$word" >> "$GITHUB_OUTPUT"
+      # sandbox: on, so the server is started as the agent's user, as whenever it can run code
+      - name: 9 · mcp_config
+        id: mcprun
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: edit
+          sandbox: 'on'
+          mcp_config: ${{ steps.mcp.outputs.config }}
+          prompt: |
+            Call the MCP tool named secret_word from the MCP server named echo (it may be listed as echo_secret_word). It takes no arguments and returns a word. Create a file named MCP.txt at the repository root whose only content is that exact word. Then stop.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: fail
+      - name: Check · mcp_config
+        if: ${{ !cancelled() }}
+        env:
+          CONCLUSION: ${{ steps.mcprun.outputs.conclusion }}
+          WORD: ${{ steps.mcp.outputs.word }}
+          REPORT: ${{ steps.mcprun.outputs.report_dir }}
+        run: |
+          echo "conclusion=$CONCLUSION"
+          test "$CONCLUSION" = success
+          grep -qF "$WORD" MCP.txt
+          # the env values of mcp_config are redacted in the configuration kept in the report
+          if grep -rqF "$WORD" "$REPORT/config"; then echo "::error::the mcp_config env is not redacted in the report"; exit 1; fi
+
+      # docs/security.md: no token, credential or runtime token reaches the agent, and as its own
+      # user it cannot read other processes' environment, use sudo or write $RUNNER_TEMP. Models
+      # rightly refuse a prompt to dump credentials, so the probe is the completion check, which
+      # runs as the agent's user in the agent's environment; the model only lists variable names.
+      # What the probe finds is checked below, never printed.
+      - name: Probe for what the agent can reach
+        if: ${{ !cancelled() }}
+        run: |
+          cat > "$RUNNER_TEMP/probe.sh" <<'EOF'
+          {
+            echo "user=$(id -un)"
+            echo "--- env"; env | grep -E 'TOKEN|GITHUB|ACTIONS'
+            echo "--- git"; cat ~/.git-credentials .git/config 2>&1; git config --list --show-origin 2>&1
+            echo "--- RUNNER_TEMP"; for f in "$RUNNER_TEMP"/* "$RUNNER_TEMP"/.[!.]*; do [ -f "$f" ] && grep -IsiE 'extraheader|authorization' "$f"; done
+            echo "--- other processes"; for f in /proc/[0-9]*/environ; do tr '\0' '\n' < "$f" 2>/dev/null; done | grep -E 'TOKEN|GITHUB_|ACTIONS_' | sort -u
+            echo "--- sudo"; sudo -n id 2>&1
+            echo "--- write RUNNER_TEMP"; touch "$RUNNER_TEMP/agent-wrote-here" 2>&1
+            echo probe-done
+          } > PROBE.txt 2>&1
+          exit 0
+          EOF
+          chmod 644 "$RUNNER_TEMP/probe.sh"
+      - name: 10 · token isolation (full shell)
+        id: isolation
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          harness: ${{ inputs.harness }}
+          model: ${{ inputs.model }}
+          tools: full
+          sandbox: 'on'
+          loop_until: bash "$RUNNER_TEMP/probe.sh"
+          prompt: |
+            Use your shell tool to run this command exactly as written, then stop:
+            `env | cut -d= -f1 | sort > ENV_NAMES.txt`
+            It writes only the names of the environment variables (no values) to ENV_NAMES.txt. Do not run anything else.
+          budget_usd: '0.50'
+          timeout_minutes: '5'
+          on_agent_error: fail
+      - name: Check · token isolation
+        if: ${{ !cancelled() }}
+        env:
+          CONCLUSION: ${{ steps.isolation.outputs.conclusion }}
+          REPORT: ${{ steps.isolation.outputs.report_dir }}
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          echo "conclusion=$CONCLUSION"
+          test "$CONCLUSION" = success
+          test -f PROBE.txt
+          grep -qx probe-done PROBE.txt
+          test -s ENV_NAMES.txt
+          fail=0
+          bad() { echo "::error::$1"; fail=1; }
+          grep -q '^user=ha-agent-' PROBE.txt || bad "the agent did not run as its own user"
+          # (the shell runs with pipefail: a grep that matches nothing must not end the script)
+          leaked=$(grep -xE 'GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|GITHUB_(OUTPUT|ENV|PATH|STEP_SUMMARY)|INPUT_.*' ENV_NAMES.txt | tr '\n' ' ' || true)
+          [ -z "$leaked" ] || bad "the agent's shell has variables that should be scrubbed: $leaked"
+          b64=$(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 -w0)
+          echo "PROBE.txt: $(wc -l < PROBE.txt) lines"
+          grep -qF "$JOB_TOKEN" PROBE.txt && bad "the job token reached the agent"
+          grep -qF "$b64" PROBE.txt && bad "the checkout credentials reached the agent"
+          for v in ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+            [ -n "${!v:-}" ] && grep -qF "${!v}" PROBE.txt && bad "the value of $v reached the agent"
+          done
+          grep -qE '^(GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)=.' PROBE.txt && bad "a token variable is set for the agent"
+          grep -qiE 'authorization: *(basic|bearer) +[A-Za-z0-9+/=._-]{16,}' PROBE.txt && bad "an authorization header reached the agent"
+          grep -q 'uid=0(root)' PROBE.txt && bad "the agent could use sudo"
+          test -e "$RUNNER_TEMP/agent-wrote-here" && bad "the agent could write \$RUNNER_TEMP"
+          grep -rqF "$JOB_TOKEN" "$REPORT" && bad "the report holds the job token"
+          exit $fail
