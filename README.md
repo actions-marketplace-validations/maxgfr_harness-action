@@ -105,6 +105,34 @@ jobs:
       - run: echo '${{ steps.audit.outputs.structured_output }}' | jq .
 ```
 
+### Reusable workflows
+
+Recipes 1 and 2 also come as reusable workflows. The caller grants the permissions: a called workflow cannot get more than that.
+
+```yaml
+on:
+  issue_comment: { types: [created] }
+  issues: { types: [opened, assigned, labeled] }
+jobs:
+  harness:
+    permissions: { contents: write, pull-requests: write, issues: write, actions: read }
+    uses: maxgfr/harness-action/.github/workflows/reusable-bot.yml@v2
+    with: { model: anthropic/claude-sonnet-5-5, trigger_phrase: '@harness, /h' }
+    secrets: inherit
+```
+
+```yaml
+on: { pull_request: { types: [opened, synchronize, ready_for_review] } }
+jobs:
+  review:
+    permissions: { contents: read, pull-requests: write, issues: write, security-events: write }
+    uses: maxgfr/harness-action/.github/workflows/reusable-review.yml@v2
+    with: { harness: codex, model: openai/gpt-5.1-codex, skills: your-org/review-skills#security-review, skill: security-review }
+    secrets: { OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}' }
+```
+
+`secrets: inherit` hands over every secret of the repository; list them instead to pass only the provider key. The review skips drafts, bots and authors outside `trusted_associations`. Inputs in [docs/recipes.md](docs/recipes.md#reusable-workflows).
+
 More in [docs/recipes.md](docs/recipes.md).
 
 ## Talk to it like your local agent
@@ -187,6 +215,8 @@ Every harness gets the same skills, the same `harness` MCP server and the same p
 | `anthropic` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-5-5` |
 | `openai` | `OPENAI_API_KEY` | `openai/gpt-5.1-codex` |
 | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/qwen/qwen3-coder` |
+| `opencode` | `OPENCODE_API_KEY` | `opencode/<model>` (OpenCode pay-as-you-go; its free models need the `opencode` harness) |
+| `opencode-go` | `OPENCODE_API_KEY` | `opencode-go/kimi-k3` |
 | `groq`, `deepseek`, `mistral`, `xai`, `together`, `google` | `<PROVIDER>_API_KEY` (`GEMINI_API_KEY` for google) | `deepseek/deepseek-chat` |
 | anything else | `api_key_env` | `base_url: https://my-gateway/v1` + `model: my/model-id` |
 
@@ -222,7 +252,7 @@ All inputs and their defaults are in [`action.yml`](action.yml). The main ones:
 | `skills` / `skill` | — | skill sources (one per line) / the skill to use |
 | `tools` | `auto` | `read-only`, `edit`, `full` (`auto`: tag → edit, automation → read-only) |
 | `allow_bash` | — | shell commands allowed at `edit` |
-| `trigger_phrase` · `label_trigger` · `assignee_trigger` | `@harness` · `harness` · — | tag mode triggers |
+| `trigger_phrase` · `label_trigger` · `assignee_trigger` | `@harness` · `harness` · — | tag mode triggers (`trigger_phrase`: several, comma or newline separated) |
 | `commit_mode` | `auto` | `auto`, `pr-branch`, `new-branch`, `none` |
 | `use_sticky_comment` · `track_progress` · `post_comment` | `false` | comment behaviour |
 | `allowed_bots` · `allowed_non_write_users` | — | who may trigger (default: users with write access) |
@@ -264,6 +294,8 @@ node test/e2e/run.mjs --harness pi --scenario pr-automation
 The scenarios are `issue-tag`, `pr-automation` and `conversation-loop` (two runs: a loop that opens a PR, then a mention on it that must resume the session). Harnesses: `opencode`, `codex`, `pi`, `openclaw`. `e2e-live.yml` runs each harness on a **real model** (`ANTHROPIC_API_KEY`; Codex needs `OPENAI_API_KEY` or `OPENROUTER_API_KEY`): a skill run, a loop that must satisfy `loop_until`, and a second turn that must remember the first.
 
 CI runs both on every push, plus `action.yml` itself (`uses: ./`): a smoke test, and a loop + conversation test that goes through the **real** session stores (artifact and cache). `.github/workflows/e2e-github.yml` checks the action against the **real** GitHub API (comments, reviews, branches, Verified commits, pull requests): comment `@harness-e2e harness=pi` on an issue or a PR of this repository (`expect=resumed` on a second comment), or run it from the Actions tab for the prompt → PR flow. `e2e-live.yml` runs real models (manual, needs provider secrets).
+
+`e2e-free.yml` runs real end-to-end tests on every push, pull request and once a day, with no secret and no cost, using OpenCode's free models through the `opencode` harness (the other harnesses are covered by the mock e2e in `ci.yml` and by `e2e-live.yml`). It runs the core scenarios (skill run, loop mode with a completion check, resumed session) and an extended set: a read-only question, structured output, the `fail_on` gate, `max_steps`, `allow_bash` restrictions, an `mcp_config` server, and a token-isolation probe that checks that a full-shell agent, running as its own user, sees no GitHub token, credentials or runtime tokens. `scripts/free-model.mjs` picks the model from OpenCode's live catalog; a failed run is retried once, in full, on the next free model, and the `free-e2e` job is the single check to mark as required. All scenarios live in the reusable `e2e-scenarios.yml`.
 
 The e2e suite needs no API key. `test/mock-llm` speaks the OpenAI Chat Completions, OpenAI Responses and Anthropic Messages APIs and replays a script, whatever harness is on the other end. `test/mock-github` records the comments, reviews, refs and GraphQL commits.
 
