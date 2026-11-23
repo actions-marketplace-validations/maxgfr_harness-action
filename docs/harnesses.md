@@ -37,6 +37,12 @@ Skills committed to the repository in **any** of `.agents/`, `.claude/`, `.openc
   - provider keys are referenced as `{ source: "env", provider: "env", id: "<VAR>" }` with a `secrets.providers.env` entry, so the key itself is never written to the config (which goes to the report artifact);
   - it prints one JSON document when the turn ends and exits 1 on failure, with the reason on stderr; `budget_usd` is checked after each turn.
 
+## Providers
+
+A known provider (`model: <provider>/<model>`, see [`src/harness/providers.mjs`](../src/harness/providers.mjs)) goes to the harness's own provider of that name when it has one (OpenCode, Pi, OpenClaw); Codex is given its base URL and talks to `<base>/responses`. A `base_url` always declares a custom provider instead.
+
+- **`opencode`** (OpenCode Console, pay-as-you-go) and **`opencode-go`** (the Go subscription) read `OPENCODE_API_KEY` and work with every harness: `https://opencode.ai/inference/openai/v1` and `https://opencode.ai/inference/go/openai/v1` for Codex, the native provider for the others. OpenCode's **free** models are reachable only through the `opencode` harness.
+
 ## Versions
 
-Pinned in [`src/harness/versions.json`](../src/harness/versions.json), bumped weekly by a workflow that opens a PR. The keyless e2e matrix validates each bump. Override per run with `harness_version` (an npm version).
+Pinned in [`src/harness/versions.json`](../src/harness/versions.json), bumped weekly by a workflow that opens a PR. The bump adopts only stable releases published at least 3 days earlier (see [security](security.md)). The keyless e2e matrix validates each bump. Override per run with `harness_version` (an npm version).

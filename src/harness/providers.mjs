@@ -9,6 +9,10 @@ export const PROVIDERS = {
   xai: { baseUrl: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', protocol: 'openai' },
   together: { baseUrl: 'https://api.together.xyz/v1', keyEnv: 'TOGETHER_API_KEY', protocol: 'openai' },
   google: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyEnv: 'GEMINI_API_KEY', protocol: 'openai' },
+  // OpenCode Console: pay-as-you-go (Zen) and the Go subscription. Pi and OpenClaw know both
+  // natively; OpenCode's free models are reachable only through the opencode harness.
+  opencode: { baseUrl: 'https://opencode.ai/inference/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai' },
+  'opencode-go': { baseUrl: 'https://opencode.ai/inference/go/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai' },
   ollama: { baseUrl: 'http://localhost:11434/v1', keyEnv: '', protocol: 'openai' },
 };
 
