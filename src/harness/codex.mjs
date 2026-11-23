@@ -12,6 +12,10 @@ export function validateEndpoint({ endpoint }) {
   if (endpoint.protocol === 'anthropic') {
     throw new Error('codex only speaks OpenAI-compatible APIs. Use an OpenAI-compatible endpoint (e.g. openrouter/anthropic/<model>) or another harness for Anthropic models.');
   }
+  // (`wire_api = "chat"` is gone upstream: a provider without /responses fails only mid-run)
+  if (endpoint.responses === false && !endpoint.custom) {
+    throw new Error(`codex needs the OpenAI Responses API, which ${endpoint.provider} does not serve. Use openrouter/<vendor>/<model>, a base_url that serves /responses, or another harness (opencode, pi, openclaw).`);
+  }
   if (!endpoint.baseUrl) throw new Error(`codex does not know provider "${endpoint.provider}". Set base_url (and api_key_env) for it.`);
 }
 
@@ -59,6 +63,7 @@ export function withUserToml(generated, user) {
 export default {
   id: 'codex',
   streaming: true,
+  reportsCost: false, // its events carry tokens, not a price: budget_usd cannot be checked
   validate: validateEndpoint,
   install: ({ version, toolsDir, log, meta }) => npmInstall({ id: 'codex', pkg: meta.package, bin: meta.bin, version, toolsDir, log }),
 

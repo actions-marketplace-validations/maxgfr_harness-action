@@ -85,7 +85,7 @@ jobs:
           skill: echo-check
           tools: read-only
           prompt: Run the echo check on this repository. You are read-only, so do not create files; report the finding.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '10'
           on_agent_error: fail
 
@@ -117,7 +117,7 @@ jobs:
           loop_until: bash "$RUNNER_TEMP/loop-check.sh"
           max_iterations: '3'
           session_key: ${{ env.SESSION_KEY }}
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '10'
           on_agent_error: fail
 
@@ -131,7 +131,7 @@ jobs:
           tools: read-only
           prompt: Without reading any file, answer from memory of this conversation only — what is the exact name of the file you created in your previous turn? Answer with the file name only.
           session_key: ${{ env.SESSION_KEY }}
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '10'
           on_agent_error: fail
 
@@ -183,7 +183,7 @@ jobs:
           tools: read-only
           prompt: |
             Answer this question without changing anything. Read the file src/inputs.mjs and find the function named sessionArtifactName. What string does it return? Quote the template string exactly as it is written in the code, then explain it in one sentence.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: fail
       - name: Check · ask
@@ -209,7 +209,7 @@ jobs:
           json_schema: '{"type":"object","required":["files","language"],"properties":{"files":{"type":"integer","minimum":1},"language":{"type":"string","minLength":1}}}'
           prompt: |
             List the directory src/ (only src/ itself, not its subdirectories) and count the files in it whose name ends in .js or .mjs. Then submit the result by calling the tool submit_structured_output exactly once, with "files" set to that count (an integer) and "language" set to the main programming language of the repository.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: fail
       - name: Check · structured output
@@ -242,7 +242,7 @@ jobs:
           tools: read-only
           fail_on: warning
           prompt: Run the echo check on this repository. You are read-only, so do not create files; report the finding.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: warn
       - name: Check · gate
@@ -273,7 +273,7 @@ jobs:
           max_steps: '1'
           prompt: |
             Read these five files one after the other, with one separate read tool call for each: README.md, package.json, action.yml, LICENSE, src/inputs.mjs. Then say how many lines each one has.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: warn
       - name: Check · max_steps
@@ -303,7 +303,7 @@ jobs:
             1. `echo allowed > A.txt`
             2. `hostname > DENIED.txt`
             The second command is expected to be refused. If it is refused, do not create DENIED.txt in any other way and do not try another command. Do not use any tool other than the shell. Then stop.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: warn
       - name: Check · allow_bash
@@ -344,7 +344,7 @@ jobs:
           mcp_config: ${{ steps.mcp.outputs.config }}
           prompt: |
             Call the MCP tool named secret_word from the MCP server named echo (it may be listed as echo_secret_word). It takes no arguments and returns a word. Create a file named MCP.txt at the repository root whose only content is that exact word. Then stop.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: fail
       - name: Check · mcp_config
@@ -396,7 +396,7 @@ jobs:
             Use your shell tool to run this command exactly as written, then stop:
             `env | cut -d= -f1 | sort > ENV_NAMES.txt`
             It writes only the names of the environment variables (no values) to ENV_NAMES.txt. Do not run anything else.
-          budget_usd: '0.50'
+          budget_usd: ${{ inputs.harness != 'codex' && '0.50' || '' }} # codex reports no cost: refused
           timeout_minutes: '5'
           on_agent_error: fail
       - name: Check · token isolation

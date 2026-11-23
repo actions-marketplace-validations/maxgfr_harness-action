@@ -19,7 +19,7 @@ And you can **talk to it like you talk to your local coding agent**: ask it a qu
 ## Why
 
 - **Any model.** Anthropic, OpenAI, OpenRouter, Groq, DeepSeek, Mistral, xAI, Gemini, Ollama, or any OpenAI-compatible endpoint (`base_url`).
-- **Any harness.** Pick the agent loop that suits the model: OpenCode (default), Codex, Pi or OpenClaw.
+- **Any harness.** Pick the agent loop that suits the model: OpenCode (default), Codex, Pi or OpenClaw (Codex needs a provider serving the OpenAI Responses API).
 - **Any skill.** Install skills from any repository (`owner/repo@ref#skill`), or use the ones committed in yours (`.agents/`, `.claude/`, `.opencode/`, `.codex/`, `.pi/`, `.openclaw/skills`). Each harness gets them at its own discovery path.
 - **The token never reaches the agent.** The run happens in a step that has no GitHub token, as its own system user when the agent can run code, so that it cannot reach the steps that hold the token. Persisted checkout credentials are removed for that step. Comments, reviews and commits are replayed afterwards by deterministic code (see [Security](docs/security.md)).
 - **One output contract.** Every harness reports the same way: findings become annotations, SARIF and a gate (`fail_on`); `json_schema` gives a validated `structured_output`; plus a job summary, a sticky comment and a report artifact.
@@ -200,7 +200,7 @@ The pull request carries the conversation: mention `@harness` on it (with the ta
 | Install | npm `@opencode/cli` (OpenCode 2) | npm `@openai/codex` | npm `@earendil-works/pi-coding-agent` | npm `openclaw` (Node ≥ 24.16) |
 | Providers | ~75 built in + any OpenAI/Anthropic-compatible | OpenAI + any OpenAI-compatible (Responses API) | ~15 built in + any compatible | built-in providers + any OpenAI/Anthropic-compatible |
 | `allow_bash` patterns | ✅ enforced per pattern | sandboxed shell instead | bash all-or-nothing | shell all-or-nothing |
-| Cost reported (`budget_usd`) | ✅ | ❌ (step / time limits only) | ✅ | ✅ (checked after each turn) |
+| Cost reported (`budget_usd`) | ✅ | ❌ (`budget_usd` refused: step / time limits only) | ✅ | ✅ (checked after each turn) |
 | Resumes a session (conversation, loop) | ✅ export / import | ✅ `exec resume` | ✅ `--session` | ✅ `--session-id` |
 | Live event stream | ✅ | ✅ | ✅ | one JSON per turn |
 

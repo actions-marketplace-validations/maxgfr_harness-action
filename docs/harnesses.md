@@ -13,7 +13,7 @@ Each adapter translates the same portable settings (`model`, `tools`, `allow_bas
 | skills | `~/.agents/skills` + the repo's `.opencode`/`.claude`/`.agents` | `~/.agents/skills` + repo `.agents/skills` | `~/.agents/skills` + repo `.agents`/`.pi` | `skills.load.extraDirs: [~/.agents/skills]` |
 | MCP tool names | `harness_<tool>` | `harness.<tool>` (namespace) | `mcp__harness__<tool>` | `harness__<tool>` |
 | resume (loop, conversation) | `-s <id>`; `session export` / `session import` | `exec resume <id>`; `CODEX_HOME/sessions` | `--session <id>`; the session dir | `--session-id <id>` (chosen by the action); `~/.openclaw/state` + `agents` |
-| cost | per step | — | per message | per turn |
+| cost | per step | not reported (`budget_usd` refused) | per message | per turn |
 
 Skills committed to the repository in **any** of `.agents/`, `.claude/`, `.opencode/`, `.codex/`, `.pi/`, `.openclaw/skills` are copied to the isolated home, so every harness sees them, whatever harness they were written for.
 
@@ -39,7 +39,7 @@ Skills committed to the repository in **any** of `.agents/`, `.claude/`, `.openc
 
 ## Providers
 
-A known provider (`model: <provider>/<model>`, see [`src/harness/providers.mjs`](../src/harness/providers.mjs)) goes to the harness's own provider of that name when it has one (OpenCode, Pi, OpenClaw); Codex is given its base URL and talks to `<base>/responses`. A `base_url` always declares a custom provider instead.
+A known provider (`model: <provider>/<model>`, see [`src/harness/providers.mjs`](../src/harness/providers.mjs)) goes to the harness's own provider of that name when it has one (OpenCode, Pi, OpenClaw); Codex is given its base URL and talks to `<base>/responses`. A `base_url` always declares a custom provider instead. Codex speaks only the Responses API, so it works with `openai`, `openrouter`, `xai`, `groq`, `ollama`, `opencode`, `opencode-go` and any `base_url` serving `/responses`, not with `deepseek`, `google`, `mistral` or `together` directly (use them through `openrouter`).
 
 - **`opencode`** (OpenCode Console, pay-as-you-go) and **`opencode-go`** (the Go subscription) read `OPENCODE_API_KEY` and work with every harness: `https://opencode.ai/inference/openai/v1` and `https://opencode.ai/inference/go/openai/v1` for Codex, the native provider for the others. OpenCode's **free** models are reachable only through the `opencode` harness.
 

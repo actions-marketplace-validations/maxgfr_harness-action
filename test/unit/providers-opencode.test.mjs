@@ -10,10 +10,10 @@ const base = { perms: permissionProfile('read-only'), mcpServers: {}, harnessCon
 
 test('resolveEndpoint knows the OpenCode Console providers', () => {
   assert.deepEqual(resolveEndpoint({ provider: 'opencode' }), {
-    provider: 'opencode', baseUrl: 'https://opencode.ai/inference/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai', custom: false,
+    provider: 'opencode', baseUrl: 'https://opencode.ai/inference/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai', responses: true, custom: false,
   });
   assert.deepEqual(resolveEndpoint({ provider: 'opencode-go' }), {
-    provider: 'opencode-go', baseUrl: 'https://opencode.ai/inference/go/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai', custom: false,
+    provider: 'opencode-go', baseUrl: 'https://opencode.ai/inference/go/openai/v1', keyEnv: 'OPENCODE_API_KEY', protocol: 'openai', responses: true, custom: false,
   });
 });
 

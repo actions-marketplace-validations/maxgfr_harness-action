@@ -111,7 +111,7 @@ inputs:
     required: false
     default: '30'
   budget_usd:
-    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and OpenClaw report cost; Codex does not; OpenClaw is checked after each turn). Empty = no budget.'
+    description: 'Stop the agent when its reported cost exceeds this many USD (OpenCode, Pi and OpenClaw report cost; Codex does not, so it refuses a budget; OpenClaw is checked after each turn). Empty = no budget.'
     required: false
     default: ''
 
