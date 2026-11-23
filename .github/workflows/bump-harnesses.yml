@@ -30,4 +30,6 @@ jobs:
           body: |
             ${{ steps.bump.outputs.changes }}
 
+            Only stable releases published at least 3 days ago are adopted (`MIN_RELEASE_AGE_DAYS`), so a compromised publish has time to be caught and pulled before it is pinned.
+
             The keyless e2e matrix (CI) validates every harness against the new versions.
