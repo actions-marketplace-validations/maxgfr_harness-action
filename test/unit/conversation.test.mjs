@@ -124,7 +124,7 @@ test('a prompt too large for one command-line argument is passed as a file, meas
 test('the completion check timeout stops everything the command started', async () => {
   const started = Date.now();
   // the shell forks `sleep`: killing the shell alone would leave it holding the output pipes
-  const r = await runCheck('echo started; sleep 20; true', { cwd: process.cwd(), env: process.env, timeoutMinutes: 0.005 });
+  const r = await runCheck('echo started; sleep 20; true', { cwd: process.cwd(), env: process.env, timeoutMinutes: 0.03 }); // 1.8 s: a login shell on a loaded runner needs more than 300 ms to echo
   assert.equal(r.code, 124);
   assert.match(r.output, /started/);
   assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
