@@ -11,15 +11,31 @@
 //   `mcp list` to show every server connected;
 // - the service is discovered through $TMPDIR, so the run gets its own TMPDIR (otherwise a
 //   service started by another run, with another config, would be reused);
+// - the service binds a fixed port (49374) unless told otherwise, so the run gets its own port
+//   too (otherwise any other OpenCode service on the host makes `service start` fail);
 // - `codemode: false` puts the MCP tools in the model's tool list (`harness_<tool>`) instead
 //   of behind the Code Mode `execute` tool.
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { npmInstall } from './install.mjs';
 import { deepMerge, isPlainObject } from '../util.mjs';
 import { capture } from './exec.mjs';
 
 const rule = (action, resource, effect) => ({ action, resource, effect });
+
+/** A port of 127.0.0.1 that is free right now (the system picks it; `service set port 0` is refused). */
+export function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 /** `opencode mcp list` shows every server in a final state (`✓ name  connected`, failed…). */
 export function mcpReady(output, names) {
@@ -97,9 +113,15 @@ export default {
     };
   },
 
-  /** Start the service and wait until every MCP server has connected (or failed). */
+  /** Start the service on a port of its own and wait until every MCP server has connected (or failed). */
   async beforeRun({ bin, env, cwd, prepared, log = () => {} }) {
-    await capture(bin, ['service', 'start'], { env, cwd, timeoutMs: 60_000 });
+    // Its own port, written to service.json in the isolated HOME. The port is free when picked,
+    // not reserved: if something takes it before the service binds it, once more on another.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await capture(bin, ['service', 'set', 'port', String(await freePort())], { env, cwd, timeoutMs: 30_000 });
+      const r = await capture(bin, ['service', 'start'], { env, cwd, timeoutMs: 60_000 });
+      if (r.code === 0 || !/in use/i.test(r.stdout + r.stderr)) break;
+    }
     const names = prepared.mcpNames ?? [];
     const deadline = Date.now() + 60_000;
     let last = '';
