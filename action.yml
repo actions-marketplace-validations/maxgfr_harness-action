@@ -117,7 +117,7 @@ inputs:
 
   # ── tag mode ──────────────────────────────────────────────────────────────────────────────
   trigger_phrase:
-    description: 'Phrase that wakes the agent up in comments, reviews, issue and PR bodies.'
+    description: 'Phrase that wakes the agent up in comments, reviews, issue and PR bodies. Several: comma or newline separated, e.g. `@harness, /h`.'
     required: false
     default: '@harness'
   label_trigger:

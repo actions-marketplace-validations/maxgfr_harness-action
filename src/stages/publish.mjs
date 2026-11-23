@@ -9,6 +9,7 @@ import { collect, failsGate, validate } from '../contract.mjs';
 import { treeChanges, restoreCredentials, commitViaApi, createBranch, commentableLines, isRepo, repoRoot } from '../git.mjs';
 import { finalBody, summaryMarkdown, transcriptMarkdown, toSarif } from '../publish/render.mjs';
 import { truncate, readRegular } from '../util.mjs';
+import { stripTriggers } from '../modes.mjs';
 import { reclaim, safePath } from '../sandbox.mjs';
 
 const readJson = (f, d = null) => { try { return JSON.parse(readRegular(f)); } catch { return d; } };
@@ -57,7 +58,7 @@ export async function commitChanges({ github, inputs, context, workDir, reportDi
   if (lfs.length) core.warning(`Not committed (${lfs.length}): ${lfs.join(', ')}. These files are tracked by Git LFS; the API would commit their content instead of an LFS pointer. They are in changes.patch.`);
   if (executable.length) core.warning(`Committed without the executable bit (${executable.length}): ${executable.join(', ')}. The API creates every new file as 100644; restore it with \`git update-index --chmod=+x\`.`);
   if (!changes.additions.length && !changes.deletions.length) return { branch: null, patch: true };
-  const request = String(context.request || '').replace(/\s+/g, ' ').replace(new RegExp(inputs.triggerPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '').trim();
+  const request = stripTriggers(String(context.request || ''), inputs.triggerPhrases).replace(/\s+/g, ' ').trim();
   const headline = truncate(`${context.harness}: ${request || 'apply changes'}`, 72).replace(/… \(.*$/, '…');
   const coauthor = ctx.actorId ? `\n\nCo-authored-by: ${ctx.actor} <${ctx.actorId}+${ctx.actor}@users.noreply.github.com>` : '';
   const body = `Requested by @${ctx.actor}${ctx.number ? ` in #${ctx.number}` : ''}.\nRun: ${ctx.runUrl}${coauthor}`;

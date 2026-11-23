@@ -46,6 +46,7 @@ export function readInputs(env = process.env, { files = true } = {}) {
   const model = getInput('model', o);
   const failOn = getInput('fail_on', o);
   const harnessConfigRaw = getInput('harness_config', o);
+  const triggerPhrases = getList('trigger_phrase', o);
   return {
     // what to run
     prompt: getInput('prompt', { ...o, trim: false }).trim(),
@@ -81,7 +82,7 @@ export function readInputs(env = process.env, { files = true } = {}) {
     openPr: getBool('open_pr', false, o),
 
     // triggers (tag mode)
-    triggerPhrase: getInput('trigger_phrase', o) || '@harness',
+    triggerPhrases: triggerPhrases.length ? triggerPhrases : ['@harness'],
     labelTrigger: getInput('label_trigger', o) || 'harness',
     assigneeTrigger: getInput('assignee_trigger', o).replace(/^@/, ''),
     trackProgress: getBool('track_progress', false, o),
