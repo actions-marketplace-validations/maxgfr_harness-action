@@ -1,0 +1,120 @@
+name: harness review (reusable)
+
+# Reviews a pull request with a skill: inline comments, a sticky summary comment, annotations
+# and SARIF. Call it from a `pull_request` workflow that grants the permissions below (a called
+# workflow gets no more than its caller):
+#
+#   on: { pull_request: { types: [opened, synchronize, ready_for_review] } }
+#   jobs:
+#     review:
+#       permissions: { contents: read, pull-requests: write, issues: write, security-events: write }
+#       uses: maxgfr/harness-action/.github/workflows/reusable-review.yml@v2
+#       with: { model: openai/gpt-5.1-codex, harness: codex, skills: your-org/review-skills#security-review, skill: security-review }
+#       secrets: inherit
+#
+# Skipped for drafts, bots and authors outside `trusted_associations`: a pull request from
+# anyone else would spend your API key on code you have not looked at.
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: '`opencode`, `codex`, `pi` or `openclaw`.'
+        type: string
+        default: 'opencode'
+      harness_version:
+        description: 'Harness npm version. Empty = the version pinned by the action.'
+        type: string
+        default: ''
+      model:
+        description: '`provider/model`, e.g. `openai/gpt-5.1-codex`.'
+        type: string
+        required: true
+      skills:
+        description: 'Skill sources, one per line.'
+        type: string
+        default: ''
+      skill:
+        description: 'The skill the agent must use.'
+        type: string
+        default: ''
+      prompt:
+        description: 'What to do with the pull request.'
+        type: string
+        default: 'Review the changes of this pull request. Report every problem with report_finding and comment inline on the diff.'
+      fail_on:
+        description: 'Fail the job on a finding at or above `error`, `warning` or `notice`. Empty = never.'
+        type: string
+        default: ''
+      sarif:
+        description: 'Upload the findings to code scanning.'
+        type: string
+        default: 'true'
+      post_comment:
+        description: 'Post the result as a sticky comment on the pull request.'
+        type: string
+        default: 'true'
+      trusted_associations:
+        description: 'JSON array of the `author_association` values whose pull requests are reviewed.'
+        type: string
+        default: '["OWNER","MEMBER","COLLABORATOR"]'
+      runs_on:
+        description: 'Runner label, or a JSON array of labels.'
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      HARNESS_GITHUB_TOKEN:
+        description: 'Token for the GitHub API instead of the job token, e.g. a personal access token.'
+        required: false
+      ANTHROPIC_API_KEY: { required: false }
+      OPENAI_API_KEY: { required: false }
+      OPENROUTER_API_KEY: { required: false }
+      OPENCODE_API_KEY: { required: false }
+      GEMINI_API_KEY: { required: false }
+      DEEPSEEK_API_KEY: { required: false }
+      GROQ_API_KEY: { required: false }
+      MISTRAL_API_KEY: { required: false }
+      XAI_API_KEY: { required: false }
+      TOGETHER_API_KEY: { required: false }
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.type != 'Bot' &&
+      contains(fromJSON(inputs.trusted_associations), github.event.pull_request.author_association)
+    runs-on: ${{ startsWith(inputs.runs_on, '[') && fromJSON(inputs.runs_on) || inputs.runs_on }}
+    # a new push supersedes the review in progress
+    concurrency:
+      group: harness-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write     # inline review comments
+      issues: write            # the sticky comment
+      security-events: write   # SARIF upload
+    steps:
+      - uses: actions/checkout@v7
+      - uses: maxgfr/harness-action@v2
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+        with:
+          harness: ${{ inputs.harness }}
+          harness_version: ${{ inputs.harness_version }}
+          model: ${{ inputs.model }}
+          skills: ${{ inputs.skills }}
+          skill: ${{ inputs.skill }}
+          prompt: ${{ inputs.prompt }}
+          fail_on: ${{ inputs.fail_on }}
+          sarif: ${{ inputs.sarif }}
+          post_comment: ${{ inputs.post_comment }}
+          github_token: ${{ secrets.HARNESS_GITHUB_TOKEN || github.token }}
